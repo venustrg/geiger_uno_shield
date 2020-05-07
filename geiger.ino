@@ -3,9 +3,7 @@
 // ATmega328P 16MHz
 // mod by venus@trg.ru
 
-//#include "LiquidCrystal.h"
-#include <hd44780.h>
-#include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
+#include "LiquidCrystal.h"
 
 #include <avr/delay.h>
 
@@ -26,17 +24,13 @@
 #define BOOST_PORT PORTD
 #define BOOST      PD3
 
-#define IN_DDR     DDRD
-#define IN_PORT    PORTD
-#define IN         PD2
+#define IN_DDR  DDRD
+#define IN_PORT PORTD
+#define IN      PD2
 
-#define BUZZ_DDR   DDRC
-#define BUZZ_PORT  PORTC
-#define BUZZ       PC1
-
-#define LED_DDR    DDRB
-#define LED_PORT   PORTB
-#define LED        PB5
+#define BUZZ_DDR  DDRC
+#define BUZZ_PORT PORTC
+#define BUZZ      PC1
 
 #define BEEP_FREQ 2000
 
@@ -53,12 +47,9 @@ volatile uint32_t boost_low = (T2_FREQ / BOOST_PUMP_FREQ) - 1;
 volatile uint8_t boost_state = 1;
 uint32_t boost_running;
 
-uint8_t brightness = 4;                // screen brightness 0..5
+uint8_t brightness = 4;                // screen brightness 1..5
 
-//LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
-//const int rs=8, en=9, db4=4, db5=5, db6=6, db7=7, bl=10, blLevel=HIGH;
-//hd44780_pinIO lcd(rs, en, db4, db5, db6, db7, bl, blLevel);
-hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
 uint16_t rad_buff[GEIGER_TIME];        //массив секундных замеров для расчета фона
 uint16_t adc_key_val[5] = { 50, 200, 400, 600, 800 };   //значения АЦП для обработки кнопок
@@ -85,7 +76,7 @@ uint8_t timer_out = 0;                 //flag
 
 uint8_t buzz_vol = 5;                  //громкость треска(щелчков)  (1-5)
 uint8_t beep_vol = 5;                  //громкость тревоги  (1-5)
-uint8_t alarm_level = 100;             //уровень тревоги uR/h  (40..250 с шагом 10)
+uint8_t alarm_level = 50;              //уровень тревоги uR/h  (40..250 с шагом 10)
 
 char str_buff[18];
 
@@ -189,17 +180,12 @@ void calc_beep()
 
 void set_brightness()
 {
-    //analogWrite(10, brightness * 50);   // maybe +5
-    // 0..5 ==> 255..5
-    lcd.setBacklight(255 - brightness * 50);    // maybe +5
+    analogWrite(10, brightness * 50);  // maybe +5
 }
 
 //-------------------------------------------------------------------------------------------------
 void setup(void)                       //инициализация
 {
-
-    bitSet(LED_DDR, LED);              // disable LED on PB5 (pin 13) - Arduino Uno
-    bitClear(LED_PORT, LED);           // disable LED on PB5 (pin 13) - Arduino Uno
 
     bitSet(BOOST_DDR, BOOST);          // boost converter port - out
     bitClear(BOOST_PORT, BOOST);       // disable boost
@@ -210,7 +196,7 @@ void setup(void)                       //инициализация
     bitClear(IN_DDR, IN);              // input port - in
     bitSet(IN_PORT, IN);               // w/ pullup
 
-    calc_beep();
+    set_brightness();
 
     // timer2 - 100kHz
     TCNT2 = 0;
@@ -220,15 +206,16 @@ void setup(void)                       //инициализация
     TIMSK2 |= (1 << OCIE2A);           // enable t2 for boost
 
     lcd.begin(16, 2);
-    set_brightness();
     lcd.print("Geiger Counter");
     lcd.setCursor(0, 1);
     lcd.print("Wait a moment");
 
+    calc_beep();
     _delay_ms(100);                    // wait for boost
     boost_low = (T2_FREQ / BOOST_FREQ) - 1;     // lower boost freq downto BOOST_FREQ
 
     lcd.clear();
+
     lcd.createChar(0, s0);             //загружаем символы в дисплей
     lcd.createChar(1, s1);
     lcd.createChar(2, s2);
@@ -566,7 +553,7 @@ void menu(void)
                     alarm_level -= 10;
                 break;
             case 3:
-                if (brightness > 0)
+                if (brightness > 1)
                     brightness--;
                 set_brightness();
                 break;
