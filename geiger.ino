@@ -1,26 +1,29 @@
 // Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
 // Arduino 1.0.5
 // ATmega328P 16MHz
-// mod by venus@trg.ru - 1.4
+// mod by venus@trg.ru - 1.5
 
 //#include "LiquidCrystal.h"
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
 
-#include <avr/delay.h>
+//#include <avr/delay.h>
 
-#define GEIGER_TIME 28                 // время измерения, для СИ29БГ 75 секунд (1..255)
-// time for SBT-10A -- 2.17 / sec == 15 pulses for 6.9s ~~ 7s, so use TIME=28, DIV=4
-#define GEIGER_DIV  4                  // divisor for measured values
+// rate measurement time
+//#define GEIGER_TIME 75                 // 75 sec for SI29BG
+//#define GEIGER_DIV  1                  // no div for SI29BG
+//#define GEIGER_TIME 36                 // 36 sec for SBM-20
+//#define GEIGER_DIV  1                  // no div for SBM-20
+#define GEIGER_TIME 21                 // SBT-10A -- 2.17 / sec == 15 pulses for 6.9s ~~ 7s
+#define GEIGER_DIV  3                  // SBT-10A -- TIME=28, DIV=4 or TIME=21, DIV=3
 
-//Timer1 25Hz для секунд
-#define T1_FREQ     25                 // timer1 frequency (meta value) for main loop
+#define T0_FREQ    1000                // timer0 frequency
 #define T2_FREQ 100000L                // timer2 (main) frequency
 
-#define BOOST_FREQ      10             // boost converter 10us pulses frequency
+#define BOOST_FREQ      5              // boost converter 10us pulses frequency
 #define BOOST_PUMP_FREQ 1000           // initial boost frequency
 
-#define NUM_KEYS 5                     // количество кнопок
+#define NUM_KEYS 5                     // number of keys
 
 #define BOOST_DDR  DDRD
 #define BOOST_PORT PORTD
@@ -38,7 +41,39 @@
 #define LED_PORT   PORTB
 #define LED        PB5
 
-#define BEEP_FREQ 2000
+#define BUZZER_ON bitSet(BUZZ_PORT, BUZZ)
+#define BUZZER_OFF bitClear(BUZZ_PORT, BUZZ)
+
+#define BOOSTER_ON bitSet(BOOST_PORT, BOOST)
+#define BOOSTER_OFF bitClear(BOOST_PORT, BOOST)
+
+#define BEEP_FREQ 2000                 // alarm beep frequency (Hz)
+
+enum scr_pages {
+    SCR_RATE = 0,
+    SCR_DOSE,
+    SCR_NOBOOST
+};
+
+enum menu_pages {
+    SET_BUZZER_VOL = 0,
+    SET_ALARM_VOL,
+    SET_ALARM_LEVEL,
+    SET_BRIGHTNESS
+};
+
+enum boost_states {
+    BOOST_IDLE = 0,
+    BOOST_ON,
+    BOOST_OFF
+};
+
+enum beep_states {
+    BEEP_IDLE = 0,
+    BEEP_START,
+    BEEP_ON,
+    BEEP_OFF
+};
 
 volatile uint8_t beep_gen = 0;         // beep now, 1 == on, 0 == off
 volatile uint32_t beep_high;           // beep meander high level length in 10us units
@@ -48,9 +83,11 @@ uint32_t beep_running;
 volatile uint8_t tick_gen = 0;         // tick now, 1 == on, no need for 0
 uint8_t tick_running;
 
+
+volatile uint8_t boost_state = BOOST_ON;
 // boost low level len in 10us units, initially for 1000Hz
 volatile uint32_t boost_low = (T2_FREQ / BOOST_PUMP_FREQ) - 1;
-volatile uint8_t boost_state = 1;
+
 uint32_t boost_running;
 
 uint8_t brightness = 4;                // screen brightness 0..5
@@ -60,39 +97,53 @@ uint8_t brightness = 4;                // screen brightness 0..5
 //hd44780_pinIO lcd(rs, en, db4, db5, db6, db7, bl, blLevel);
 hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
 
-uint16_t rad_buff[GEIGER_TIME];        // массив секундных замеров для расчета фона
-uint16_t adc_key_val[5] = { 50, 200, 400, 600, 800 };   // значения АЦП для обработки
+enum keypress {
+    KEY_RIGHT = 1,
+    KEY_UP,
+    KEY_DOWN,
+    KEY_LEFT,
+    KEY_SELECT
+};
 
-// кнопок
+uint16_t adc_key_val[5] = { 50, 200, 400, 600, 800 };   // ADC values for keys
 
-uint32_t rad_sum;                      // сумма импульсов за все время
-uint32_t rad_back;                     // текущий фон
-uint32_t rad_max;                      // максимум фона
-uint32_t rad_dose;                     // доза
+volatile uint16_t geiger[GEIGER_TIME]; // per-sec pulse counters
+volatile uint32_t total;               // total pulse counter
 
-uint8_t time_sec;                      // секунды //счетчики времени
-uint8_t time_min;                      // минуты
-uint8_t time_hrs;                      // часы
+volatile uint32_t rate;                // current rate
+volatile uint32_t rate_max;            // max rate
+uint32_t dose;                         // calculated dose
+uint8_t t_sec, t_min, t_hrs;           // clock
 
-volatile uint8_t scr_mode;             // режим
+volatile uint8_t scr_page;             // currently displayed page
 
-uint8_t scr = 0;                       // флаг обновления экрана
-uint8_t alarm = 0;                     // флаг тревоги
-uint8_t alarm_disable = 0;             // флаг запрета тревоги
-uint8_t alarm_wait = 0;                // флаг ожидания выключения запрета
-uint8_t buzz_disable = 0;              // флаг запрет треска пищалкой
+uint8_t redraw = 1;                    // redraw screen
+uint8_t alarm = 0;                     // alarm raised
+uint8_t alarm_disable = 0;             // alarm prohibited
+uint8_t alarm_wait = 0;                // alarm is awaiting for rate lowering
+uint8_t buzz_disable = 0;              // buzz ticked prohibited
 
-uint8_t timer = 0;                     // for delay
-uint8_t timer_out = 0;                 // flag
+volatile uint8_t timer = 0;            // just for delay
+volatile uint8_t timer_out = 0;        // timer exausted flag
 
-uint8_t buzz_vol = 5;                  // громкость треска(щелчков) (1-5)
-uint8_t beep_vol = 5;                  // громкость тревоги (1-5)
-uint8_t alarm_level = 100;             // уровень тревоги uR/h (40..250 с шагом 10)
+uint8_t buzz_vol = 3;                  // buzz tick volume (1-5)
+uint8_t beep_vol = 3;                  // alarm beep volume (1-5)
+uint8_t alarm_level = 50;              // alarm rate level, uR/h (40..250 step 10)
+
+volatile uint16_t msec = 0;
+
+void delay_ms(uint16_t ms)
+{
+    msec = ms;
+    while (msec)
+        __asm__("nop\n\t");
+}
 
 char str_buff[18];
 
 // *INDENT-OFF*
 
+// "alarm on" sign 1
 uint8_t s0[8] = {
     0b00000,
     0b00100,
@@ -104,6 +155,7 @@ uint8_t s0[8] = {
     0b00000
 };
 
+// "alarm on" sign 2
 uint8_t  s1[8] = {
     0b00000,
     0b00100,
@@ -115,6 +167,7 @@ uint8_t  s1[8] = {
     0b00000
 };
 
+// "menu page" sign 
 uint8_t  s2[8] = {
     0b00000,
     0b11111,
@@ -126,6 +179,7 @@ uint8_t  s2[8] = {
     0b00000
 };
 
+// "awaiting" sign - "..."
 uint8_t  s3[8] = {
     0b00000,
     0b00000,
@@ -137,6 +191,7 @@ uint8_t  s3[8] = {
     0b10101
 };
 
+// "buzzer on" sign 1
 uint8_t  s4[8] = {
     0b00000,
     0b00001,
@@ -148,6 +203,7 @@ uint8_t  s4[8] = {
     0b00000
 };
 
+// "buzzer on" sign 2
 uint8_t  s5[8] = {
     0b00000,
     0b00000,
@@ -159,30 +215,9 @@ uint8_t  s5[8] = {
     0b00000
 };
 
-uint8_t  s6[8] = {
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000
-};
-
-uint8_t  s7[8] = {
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000,
-    0b00000
-};
-
 // *INDENT-ON*
 
+// calculate timer parameters for given frequency and volume
 void calc_beep()
 {
     beep_high = beep_vol;
@@ -196,49 +231,55 @@ void set_brightness()
     lcd.setBacklight(255 - brightness * 50);    // maybe +5
 }
 
-//-------------------------------------------------------------------------------------------------
-void setup(void)                       // инициализация
+void setup(void)
 {
 
     bitSet(LED_DDR, LED);              // disable LED on PB5 (pin 13) - Arduino Uno
     bitClear(LED_PORT, LED);           // disable LED on PB5 (pin 13) - Arduino Uno
 
     bitSet(BOOST_DDR, BOOST);          // boost converter port - out
-    bitClear(BOOST_PORT, BOOST);       // disable boost
+    BOOSTER_OFF;
 
     bitSet(BUZZ_DDR, BUZZ);            // buzzer port - out
-    bitClear(BUZZ_PORT, BUZZ);
+    BUZZER_OFF;
 
     bitClear(IN_DDR, IN);              // input port - in
     bitSet(IN_PORT, IN);               // w/ pullup
 
     calc_beep();
 
-    // timer2 - 100kHz
+    // timer0 - 1kHz (for 1ms/10ms/1s timings)
+    TCNT0 = 0;
+    TCCR0A = (1 << WGM01);             // CTC mode
+    TCCR0B = (0 << CS02) | (1 << CS01) | (1 << CS00);   // div=64 -- 125kHz base
+    OCR0A = F_CPU / 64 / T0_FREQ;      // calc OCR for 1kHz
+    TIMSK0 |= (1 << OCIE0A);           // enable t0
+
+    // timer2 - 100kHz (for 10us boost/sound pulses)
     TCNT2 = 0;
     TCCR2A = (1 << WGM21);             // CTC mode
-    TCCR2B = (0 << CS22) | (0 << CS21) | (1 << CS20);   // no divisor - full cpu speed
-    OCR2A = F_CPU / T2_FREQ;           // 100kHz
-    TIMSK2 |= (1 << OCIE2A);           // enable t2 for boost
+    TCCR2B = (0 << CS22) | (1 << CS21) | (0 << CS20);   // div=8 -- 2MHz base
+    OCR2A = F_CPU / 8 / T2_FREQ;       // calc OCR for 100kHz
+    TIMSK2 |= (1 << OCIE2A);           // enable t2
 
     lcd.begin(16, 2);
     set_brightness();
-    lcd.print("Geiger Counter");
+    lcd.setCursor(0, 0);
+    lcd.print("GEiGER COUNtER");
     lcd.setCursor(0, 1);
-    lcd.print("Wait a moment");
+    lcd.print("StARtiNG");
+    delay_ms(1000);                    // wait for boost
 
-    _delay_ms(50);                     // wait for boost
     boost_low = (T2_FREQ / BOOST_FREQ) - 1;     // lower boost freq downto BOOST_FREQ
 
     lcd.clear();
-    lcd.createChar(0, s0);             // загружаем символы в дисплей
+    delay_ms(10);
+    lcd.createChar(0, s0);             // custom chars loading
     lcd.createChar(1, s1);
     lcd.createChar(2, s2);
     lcd.createChar(3, s3);
     lcd.createChar(4, s4);
     lcd.createChar(5, s5);
-    lcd.createChar(6, s6);
-    lcd.createChar(7, s7);
 
     // irq
     EICRA = (1 << ISC01) | (0 << ISC01);        // irq0 - falling edge
@@ -246,140 +287,144 @@ void setup(void)                       // инициализация
 
 }
 
-//-------------------------------------------------------------------------------------------------
-ISR(INT0_vect)                         // внешнее прерывание на пине INT0 - считаем
-// импульсы от счетчика
-{
-    if (rad_buff[0] != 65535)
-        rad_buff[0]++;                 // нулевой элемент массива - текущий секундный
-    // замер
-    if (++rad_sum > 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME)
-        rad_sum = 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME;   // сумма импульсов
-
-    boost_state = 1;                   // force boost pulse
-
-    if (!buzz_disable)
-        tick_gen = 1;
-}
-
 // 100 kHz timer
 ISR(TIMER2_COMPA_vect)
 {
-    if (scr_mode != 2) {
-        switch (boost_state) {
-        case 1:
-            bitSet(BOOST_PORT, BOOST);
-            boost_state++;
-            break;
-        case 2:
-            bitClear(BOOST_PORT, BOOST);
-            boost_state = 0;
-            boost_running = boost_low;
-            break;
-        default:
-            if (!--boost_running)
-                boost_state = 1;
-            break;
-        }
+    // boost processing
+    switch (boost_state) {
+    case BOOST_IDLE:
+        if (scr_page != SCR_NOBOOST && boost_running && !--boost_running)
+            boost_state = BOOST_ON;
+        break;
+    case BOOST_ON:
+        BOOSTER_ON;
+        boost_state++;
+        break;
+    case BOOST_OFF:
+        BOOSTER_OFF;
+        boost_state = BOOST_IDLE;
+        boost_running = boost_low;
+        break;
     }
 
+    // beep processing
     if (beep_gen) {
         switch (beep_state) {
-        case 0:
+        case BEEP_IDLE:
             beep_state++;
-        case 1:
-            bitSet(BUZZ_PORT, BUZZ);
+        case BEEP_START:
+            BUZZER_ON;
             beep_running = beep_high;
             beep_state++;
             break;
-        case 2:
+        case BEEP_ON:
             if (!--beep_running) {
-                bitClear(BUZZ_PORT, BUZZ);
+                BUZZER_OFF;
                 beep_running = beep_low;
                 beep_state++;
             }
             break;
-        default:
+        case BEEP_OFF:
             if (!--beep_running)
-                beep_state = 1;
+                beep_state = BEEP_START;
             break;
         }
-    } else if (beep_state) {
-        bitClear(BUZZ_PORT, BUZZ);
-        beep_state = 0;
+    } else if (beep_state != BEEP_IDLE) {
+        BUZZER_OFF;
+        beep_state = BEEP_IDLE;
     }
 
+    // buzz ticker
     if (tick_gen) {
-        bitSet(BUZZ_PORT, BUZZ);
+        BUZZER_ON;
         tick_running = buzz_vol;
         tick_gen = 0;
     } else if (tick_running && !--tick_running)
-        bitClear(BUZZ_PORT, BUZZ);
+        BUZZER_OFF;
+}
 
-    static uint16_t cnt0 = 0;
+ISR(INT0_vect)                         // ext IRQ - count geiger pulses
+{
+    if (geiger[0] != 65535)
+        geiger[0]++;                   // current sec counter
+
+    // check for dose overflow (dose = total * GEIGER_TIME / GEIGER_DIV / 3600)
+    if (++total > 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME)
+        total = 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME;
+
+    if (scr_page != SCR_NOBOOST && boost_state != BOOST_ON)
+        boost_state = BOOST_ON;        // force boost pulse
+
+    if (!buzz_disable && !tick_gen)
+        tick_gen = 1;                  // make tick
+}
+
+// 1 kHz timer
+ISR(TIMER0_COMPA_vect)
+{
+    static uint8_t i;
+    static uint8_t cnt0 = 0;
     static uint8_t cnt1 = 0;
+    if (msec)
+        msec--;
 
-    // main cycle -- measurements
-
-    if (++cnt0 >= T2_FREQ / T1_FREQ) {
+    if (++cnt0 == 10) {
+        // 100Hz / 10ms here
         cnt0 = 0;
 
-        // 1/25 sec block
-        if (++cnt1 >= T1_FREQ) {       // расчет показаний один раз в секунду
+        if (timer && !--timer)
+            timer_out = 1;
+
+        if (++cnt1 == 100) {
+            // 1Hz / 1s here
             cnt1 = 0;
 
-            uint32_t tmp_buff = 0;
-            for (uint8_t i = 0; i < GEIGER_TIME; i++)
-                tmp_buff += rad_buff[i];        // расчет фона мкР/ч
+            for (i = 0, rate = 0; i < GEIGER_TIME; i++)
+                rate += geiger[i];     // count rate for GEIGER_TIME seconds
 
-            tmp_buff /= GEIGER_DIV;
+            rate /= GEIGER_DIV;
 
-            if (tmp_buff > 999999)
-                tmp_buff = 999999;     // переполнение
+            if (rate > 999999)
+                rate = 999999;         // rate overflow
 
-            rad_back = tmp_buff;
+            if (rate > rate_max)
+                rate_max = rate;       // save max rate
 
-            if (rad_back > rad_max)
-                rad_max = rad_back;    // фиксируем максимум фона
-
-            if (rad_back >= alarm_level)
-                alarm = 1;             // превышение фона
+            if (rate >= alarm_level)
+                alarm = 1;             // rate too high - alarm
             else {
                 alarm = 0;
-                if (alarm_wait)
+                if (alarm_wait) {
+                    alarm_wait = 0;
                     alarm_disable = 0;
-                alarm_wait = 0;
-            }
-
-            for (uint8_t k = GEIGER_TIME - 1; k > 0; k--)
-                rad_buff[k] = rad_buff[k - 1];  // перезапись массива
-            rad_buff[0] = 0;           // сбрасываем счетчик импульсов
-
-            rad_dose = (rad_sum * GEIGER_TIME / GEIGER_DIV / 3600);     // расчитаем дозу
-
-            if (time_hrs < 99) {       // если таймер не переполнен
-                if (++time_sec > 59) { // считаем секунды
-                    if (++time_min > 59) {      // считаем минуты
-                        if (++time_hrs > 99)
-                            time_hrs = 99;      // часы
-                        time_min = 0;
-                    }
-                    time_sec = 0;
                 }
             }
 
-            scr = 0;
+            // next sec - shift geiger array, zero 1st
+            for (i = GEIGER_TIME - 1; i > 0; i--)
+                geiger[i] = geiger[i - 1];
+            geiger[0] = 0;
+
+            // dose counting clock
+            if (++t_sec > 59) {
+                t_sec = 0;
+                if (++t_min > 59) {
+                    t_min = 0;
+                    if (++t_hrs > 99) {
+                        t_hrs = t_min = t_sec = 0;
+                        total = 0;
+                    }
+                }
+            }
+            redraw = 1;
         }
 
-        if (timer) {                   // таймер для разного
-            if (--timer == 0)
-                timer_out = 1;
-        }
     }
+
 }
 
-//-------------------------------------------------------------------------------------------------
-uint8_t get_key(void)                  // получить номер нажатой кнопки из данных АЦП
+// read and decode key pressed
+uint8_t get_key(void)
 {
     uint8_t key = 0;
     uint16_t adc_result = analogRead(0);
@@ -393,300 +438,306 @@ uint8_t get_key(void)                  // получить номер нажат
 }
 
 
-//-------------------------------------------------------------------------------------------------
-uint8_t check_keys(void)               // проверить клавиатуру
+uint8_t check_keys(void)
 {
     uint8_t k = 0;
     static uint8_t old_key;
 
-    uint8_t new_key = get_key();       // обновить состояние
-    if (new_key != old_key) {          // если состояние не равно старому - была нажата
-        // копка
-        _delay_ms(5);                  // защита от дребезга
+    uint8_t new_key = get_key();       // read key state
+    if (new_key != old_key) {          // key state changed == key pressed
+        delay_ms(5);                   // protect from bouncing
         new_key = get_key();
         if (new_key != old_key) {
             old_key = new_key;
             k = new_key;
         }
     }
-    return k;                          // вернем номер кнопки 1..5, 0-кнопка не нажата
+    return k;                          // 0 - not pressed, 1..5 - key
 }
 
-//-------------------------------------------------------------------------------------------------
-void alarm_warning(void)               // выводим предупреждение
+enum sound_states {
+    SOUND_START = 0,
+    SOUND_ON,
+    SOUND_OFF
+};
+
+void alarm_warning(void)
 {
-    uint8_t n = 0;
+    uint8_t sound_state = 0;
     uint32_t rad_alrm = 0;
 
-    uint8_t bd = buzz_disable;         // запомнить настройку звуковой индикации
-    // импульсов
-
-    buzz_disable = 1;                  // запретить звуковую индикацию импульсов
+    uint8_t old_buzz = buzz_disable;   // save ticker state
+    buzz_disable = 1;                  // disable ticker
 
     lcd.clear();
+    delay_ms(10);
+
     lcd.setCursor(0, 1);
-    lcd.print("WARNING");
-    scr == 0;
+    lcd.print("WARNiNG");
+    redraw = 1;
+    sound_state = SOUND_START;
 
     while (1) {
-        if (scr == 0) {
-            scr = 1;
-            if (rad_back > rad_alrm)
-                rad_alrm = rad_back;   // максимум
+        if (redraw) {
+            redraw = 0;
+            if (rate > rad_alrm)
+                rad_alrm = rate;       // handle max rate
             sprintf(str_buff, "%6lu uR/h", rad_alrm);
             lcd.setCursor(5, 0);
             lcd.print(str_buff);
         }
 
-        // ==================================================================
-        if (n == 0) {                  // начало прерывистого звукового сигнала
-            n = 1;
-            timer = 9;                 // длительность сигнала x40ms
-            timer_out = 0;
+        switch (sound_state) {
+        case SOUND_START:
             beep_gen = 1;
-        }
-
-        if (n == 1 && timer_out == 1) { // начало паузы между сигналами
-            n = 2;
-            timer = 4;                 // длительность паузы x40ms
+            timer = 35;                // tone length x 10ms
             timer_out = 0;
-            beep_gen = 0;
+            sound_state = SOUND_ON;
+            break;
+        case SOUND_ON:
+            if (timer_out) {
+                beep_gen = 0;
+                timer = 15;            // pause length x 10ms
+                timer_out = 0;
+                sound_state = SOUND_OFF;
+            }
+            break;
+        case SOUND_OFF:
+            if (timer_out)
+                sound_state = SOUND_START;      // next tone
+            break;
         }
 
-        if (n == 2 && timer_out == 1)
-            n = 0;                     // запуск следующего цикла
-        // ==================================================================
-
-        if (check_keys() == 4) {       // если нажата кнопка left отключаем тревогу
+        if (check_keys() == KEY_LEFT) { // stop alarm if LEFT pressed
             beep_gen = 0;
             lcd.setCursor(0, 1);
-            lcd.print("ALARM DISABLE");
-            n = 0;
-            timer = 35;                // длительность сообщения x40ms
-            timer_out = 0;
-            while (timer_out == 0)
-                if (check_keys() == 4)
-                    break;
+            lcd.print("AlARM DiSAblEd");
+            for (timer_out = 0, timer = 150; !timer_out && check_keys() != KEY_LEFT;);
             lcd.clear();
-            buzz_disable = bd;
+            delay_ms(10);
+            buzz_disable = old_buzz;
             alarm_disable = 1;
-            scr_mode = 0;
-            scr = 0;
-            return;
+            scr_page = SCR_RATE;
+            redraw = 1;
+            break;
         }
+        delay_ms(10);
     }
 }
 
-//-------------------------------------------------------------------------------------------------
 void menu(void)
 {
-    uint8_t n = 0;
+    uint8_t menu_page = SET_BUZZER_VOL;
 
     lcd.clear();
-    scr = 0;
+    delay_ms(10);
+    redraw = 1;
 
     while (1) {
         if (alarm && alarm_disable == 0)
             alarm_warning();
 
-        if (scr == 0) {                // +++++++++++++++++++ вывод информации на экран
-            // +++++++++++++++++++++++++
-            scr = 1;
+        if (redraw) {                  // update screen
+            redraw = 0;
 
             lcd.setCursor(0, 1);
-            lcd.write(byte(2));
+            lcd.write(byte(2));        // "menu page" sign
             lcd.setCursor(2, 1);
-            sprintf(str_buff, "%01u", n + 1);
+            sprintf(str_buff, "%01u", menu_page + 1);
             lcd.print(str_buff);
-
-            switch (n) {
-            case 0:
+            switch (menu_page) {
+            case SET_BUZZER_VOL:
                 sprintf(str_buff, "BUZZ VOLUME   %2u", buzz_vol);
                 break;
-            case 1:
+            case SET_ALARM_VOL:
                 sprintf(str_buff, "ALARM VOLUME  %2u", beep_vol);
                 break;
-            case 2:
+            case SET_ALARM_LEVEL:
                 sprintf(str_buff, "ALARM LEVEL  %3u", alarm_level);
                 break;
-            case 3:
+            case SET_BRIGHTNESS:
                 sprintf(str_buff, "BRIGHTNESS    %2u", brightness);
                 break;
             }
             lcd.setCursor(0, 0);
             lcd.print(str_buff);
         }
-
-        switch (check_keys()) {        // +++++++++++++++++++++ опрос кнопок +++++++++++++++++++++++++++
-        case 1:                       // right key
-            scr = 0;
-            break;
-        case 2:                       // up key
-            switch (n) {
-            case 0:
+        // handle keypress
+        switch (check_keys()) {
+        case KEY_UP:
+            switch (menu_page) {
+            case SET_BUZZER_VOL:
                 if (buzz_vol < 5)
                     buzz_vol++;
                 break;
-            case 1:
+            case SET_ALARM_VOL:
                 if (beep_vol < 5) {
                     beep_vol++;
                     calc_beep();
                 }
                 break;
-            case 2:
+            case SET_ALARM_LEVEL:
                 if (alarm_level < 250)
                     alarm_level += 10;
                 break;
-            case 3:
+            case SET_BRIGHTNESS:
                 if (brightness < 5)
                     brightness++;
                 set_brightness();
                 break;
             }
-            scr = 0;
+            redraw = 1;
             break;
-        case 3:                       // down key
-            switch (n) {
-            case 0:
+        case KEY_DOWN:
+            switch (menu_page) {
+            case SET_BUZZER_VOL:
                 if (buzz_vol > 1)
                     buzz_vol--;
                 break;
-            case 1:
+            case SET_ALARM_VOL:
                 if (beep_vol > 1) {
                     beep_vol--;
                     calc_beep();
                 }
                 break;
-            case 2:
+            case SET_ALARM_LEVEL:
                 if (alarm_level > 40)
                     alarm_level -= 10;
                 break;
-            case 3:
+            case SET_BRIGHTNESS:
                 if (brightness > 0)
                     brightness--;
                 set_brightness();
                 break;
             }
-            scr = 0;
+            redraw = 1;
             break;
-        case 4:                       // left key
-            scr = 0;
+        case KEY_LEFT:                // left key
+        case KEY_RIGHT:
+            redraw = 1;
             break;
-        case 5:                       // select key
-            if (++n > 3) {
-                n = 0;
+        case KEY_SELECT:              // select key
+            if (++menu_page > SET_BRIGHTNESS) {
                 lcd.clear();
-                scr = 0;
+                delay_ms(10);
+                redraw = 1;
                 return;
             }
-            scr = 0;
+            redraw = 1;
         default:
             break;
         }
+        delay_ms(10);
     }
 }
 
-//-------------------------------------------------------------------------------------------------
-void loop(void)                        // главная
+void loop(void)
 {
-
+    uint8_t i;
     if (alarm && alarm_disable == 0)
         alarm_warning();
 
-    if (scr == 0)                      // +++++++++++++++++++ вывод информации на экран
-        // +++++++++++++++++++++++++
-    {
-        scr = 1;                       // сброс флага
-
-        switch (scr_mode) {
-        case 0:
-            sprintf(str_buff, "Rate %6lu uR/h", rad_back);
-            break;                     // dose rate, uR/h
-        case 1:
-            sprintf(str_buff, "Dose   %6lu uR", rad_dose);
-            break;                     // dose, uR
-        case 2:
-            sprintf(str_buff, "Battery charging");
-            break;                     //
+    if (redraw) {                      // screen to be updated
+        redraw = 0;
+        // 1st line
+        switch (scr_page) {
+        case SCR_RATE:
+            // rate, uR/h
+            sprintf(str_buff, "RAtE %6lu uR/h", rate);
+            break;
+        case SCR_DOSE:
+            // dose, uR
+            dose = total * GEIGER_TIME / GEIGER_DIV / 3600;
+            sprintf(str_buff, "D0SE   %6lu uR", dose);
+            break;
+        case SCR_NOBOOST:
+            sprintf(str_buff, "b00St 0ff       ");
+            break;
         }
         lcd.setCursor(0, 0);
         lcd.print(str_buff);
-
-        switch (scr_mode) {
-        case 0:
-            sprintf(str_buff, "  %6lu", rad_max);
+        // 2nd line
+        switch (scr_page) {
+        case SCR_RATE:
+            sprintf(str_buff, "  %6lu", rate_max);
             break;                     // peak rate
-        case 1:
-            sprintf(str_buff, "%02u:%02u:%02u", time_hrs, time_min, time_sec);
+        case SCR_DOSE:
+            sprintf(str_buff, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
-        case 2:
-            sprintf(str_buff, "--------");
+        case SCR_NOBOOST:
+            sprintf(str_buff, "ChARGiNG");
             break;
         }
         lcd.setCursor(8, 1);
         lcd.print(str_buff);
-
+        // alarm on/off sign
         lcd.setCursor(0, 1);
-        if (alarm_disable) {           // если тревога запрещена
-            if (alarm_wait) {          // если ждем понижения фона
-                lcd.write(byte(3));    // значок "ожидание"
+        if (alarm_disable) {           // if alarm prohibited
+            if (alarm_wait) {          // white while rate lowered
+                lcd.write(byte(3));    // "awaiting" sign - "..."
                 lcd.write(byte(3));
             } else
                 lcd.print("  ");
         } else {
-            lcd.write(byte(0));        // значок "вкл. тревожная сигнализация"
+            lcd.write(byte(0));        // "alarm on" sign
             lcd.write(byte(1));
         }
-
+        // buzzer on/off sign
         lcd.setCursor(3, 1);
         if (buzz_disable)
             lcd.print("  ");
         else {
-            lcd.write(byte(4));        // значок "вкл. звуковая индикация импульсов"
+            lcd.write(byte(4));        // "buzzer on" sign
             lcd.write(byte(5));
         }
     }
 
-    switch (check_keys()) {            // +++++++++++++++++++++ опрос кнопок +++++++++++++++++++++++++++
-    case 1:                           // right key
-        buzz_disable = !buzz_disable;
-        scr = 0;
-        break;
-    case 2:                           // up key //выбор режима
-        if (++scr_mode > 2)
-            scr_mode = 0;
-        if (scr_mode == 2) {
-            bitClear(BOOST_PORT, BOOST);
-            boost_state = 0;
+    // handle keypress
+    switch (check_keys()) {
+    case KEY_UP:
+        if (++scr_page > SCR_NOBOOST) {
+            scr_page = SCR_RATE;
+            // little boost up
+            boost_low = (T2_FREQ / BOOST_PUMP_FREQ) - 1;
+            boost_state = BOOST_ON;
+            delay_ms(500);
+            boost_low = (T2_FREQ / BOOST_FREQ) - 1;
         }
-        scr = 0;
+        redraw = 1;
         break;
-    case 3:                           // down key //сброс
-        switch (scr_mode) {
-        case 0:                       // сбрасываем фон и макс. фон
-            for (uint8_t i = 0; i < GEIGER_TIME; i++)
-                rad_buff[i] = 0;
-            rad_back = 0;
-            rad_max = 0;
+    case KEY_DOWN:
+        switch (scr_page) {
+        case SCR_RATE:
+            // reset rate and max on DOWN
+            for (i = 0; i < GEIGER_TIME; i++)
+                geiger[i] = 0;
+            rate = 0;
+            rate_max = 0;
             break;
-        case 1:
-            rad_sum = 0;
-            rad_dose = 0;
-            time_hrs = time_min = time_sec = 0;
+        case SCR_DOSE:
+            // reset dose and time on DOWN
+            total = 0;
+            dose = 0;
+            t_hrs = t_min = t_sec = 0;
             break;
         }
-        scr = 0;
+        redraw = 1;
         break;
-    case 4:                           // left key
+    case KEY_LEFT:                    // left key
         if (alarm) {
             if (alarm_disable == 1)
                 alarm_wait = !alarm_wait;
         } else
             alarm_disable = !alarm_disable;
-        scr = 0;
+        redraw = 1;
         break;
-    case 5:                           // select key
+    case KEY_RIGHT:
+        buzz_disable = !buzz_disable;
+        redraw = 1;
+        break;
+    case KEY_SELECT:
         menu();
         break;
     }
+    delay_ms(10);
 }
