@@ -1,7 +1,7 @@
 // Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
 // Arduino 1.0.5
 // ATmega328P 16MHz
-// mod by venus@trg.ru - 1.5
+// mod by venus@trg.ru - 1.6
 
 //#include "LiquidCrystal.h"
 #include <hd44780.h>
@@ -17,29 +17,28 @@
 #define GEIGER_TIME 21                 // SBT-10A -- 2.17 / sec == 15 pulses for 6.9s ~~ 7s
 #define GEIGER_DIV  3                  // SBT-10A -- TIME=28, DIV=4 or TIME=21, DIV=3
 
-#define T0_FREQ    1000                // timer0 frequency
-#define T2_FREQ 100000L                // timer2 (main) frequency
+#define T0_FREQ     1000               // timer0 frequency
+#define T2_FREQ  100000L               // timer2 (main) frequency
 
-#define BOOST_FREQ      5              // boost converter 10us pulses frequency
-#define BOOST_PUMP_FREQ 1000           // initial boost frequency
+#define BOOST_FREQ  1000               // boost converter 10us pulses frequency
 
 #define NUM_KEYS 5                     // number of keys
 
-#define BOOST_DDR  DDRD
+#define BOOST_DDR   DDRD
 #define BOOST_PORT PORTD
-#define BOOST      PD3
+#define BOOST        PD3
 
-#define IN_DDR     DDRD
+#define IN_DDR      DDRD
 #define IN_PORT    PORTD
-#define IN         PD2
+#define IN          PD2
 
-#define BUZZ_DDR   DDRC
+#define BUZZ_DDR    DDRC
 #define BUZZ_PORT  PORTC
-#define BUZZ       PC1
+#define BUZZ        PC1
 
-#define LED_DDR    DDRB
+#define LED_DDR     DDRB
 #define LED_PORT   PORTB
-#define LED        PB5
+#define LED          PB5
 
 #define BUZZER_ON bitSet(BUZZ_PORT, BUZZ)
 #define BUZZER_OFF bitClear(BUZZ_PORT, BUZZ)
@@ -62,33 +61,12 @@ enum menu_pages {
     SET_BRIGHTNESS
 };
 
-enum boost_states {
-    BOOST_IDLE = 0,
-    BOOST_ON,
-    BOOST_OFF
-};
-
-enum beep_states {
-    BEEP_IDLE = 0,
-    BEEP_START,
-    BEEP_ON,
-    BEEP_OFF
-};
-
 volatile uint8_t beep_gen = 0;         // beep now, 1 == on, 0 == off
-volatile uint32_t beep_high;           // beep meander high level length in 10us units
-volatile uint32_t beep_low;            // beep meander low level length in 10us units
-uint32_t beep_state = 0;
-uint32_t beep_running;
+volatile uint16_t beep_high;           // beep meander high level length in 10us units
+volatile uint16_t beep_low;            // beep meander low level length in 10us units
 volatile uint8_t tick_gen = 0;         // tick now, 1 == on, no need for 0
-uint8_t tick_running;
 
-
-volatile uint8_t boost_state = BOOST_ON;
-// boost low level len in 10us units, initially for 1000Hz
-volatile uint32_t boost_low = (T2_FREQ / BOOST_PUMP_FREQ) - 1;
-
-uint32_t boost_running;
+volatile uint16_t boost_pulses;        // pulses to go with boost
 
 uint8_t brightness = 4;                // screen brightness 0..5
 
@@ -229,6 +207,7 @@ void set_brightness()
     // analogWrite(10, brightness * 50); // maybe +5
     // 0..5 ==> 255..5
     lcd.setBacklight(255 - brightness * 50);    // maybe +5
+    delay_ms(10);
 }
 
 void setup(void)
@@ -268,9 +247,10 @@ void setup(void)
     lcd.print("GEiGER COUNtER");
     lcd.setCursor(0, 1);
     lcd.print("StARtiNG");
-    delay_ms(1000);                    // wait for boost
 
-    boost_low = (T2_FREQ / BOOST_FREQ) - 1;     // lower boost freq downto BOOST_FREQ
+    boost_pulses = 1000;               // 1 sec boost
+
+    delay_ms(1000);                    // wait for boost
 
     lcd.clear();
     delay_ms(10);
@@ -287,23 +267,53 @@ void setup(void)
 
 }
 
-// 100 kHz timer
+enum boost_states {
+    BOOST_IDLE = 0,
+    BOOST_ON,
+    BOOST_OFF,
+    BOOST_PAUSE
+};
+
+enum beep_states {
+    BEEP_IDLE = 0,
+    BEEP_START,
+    BEEP_ON,
+    BEEP_OFF
+};
+
+uint8_t boost_idle = 0;
+
 ISR(TIMER2_COMPA_vect)
 {
+    static uint8_t tick_running;
+    static uint8_t boost_state = BOOST_IDLE;
+    static uint8_t beep_state = BEEP_IDLE;
+    static uint16_t boost_low;
+    static uint32_t beep_running;
+
     // boost processing
     switch (boost_state) {
     case BOOST_IDLE:
-        if (scr_page != SCR_NOBOOST && boost_running && !--boost_running)
+        if (scr_page != SCR_NOBOOST && boost_pulses)
             boost_state = BOOST_ON;
-        break;
+        else
+            break;
     case BOOST_ON:
         BOOSTER_ON;
         boost_state++;
         break;
     case BOOST_OFF:
         BOOSTER_OFF;
-        boost_state = BOOST_IDLE;
-        boost_running = boost_low;
+        boost_low = (T2_FREQ / BOOST_FREQ) - 1;
+        boost_state++;
+        break;
+    case BOOST_PAUSE:
+        if (!--boost_low) {
+            boost_idle = 0;
+            if (boost_pulses)
+                boost_pulses--;
+            boost_state = BOOST_IDLE;
+        }
         break;
     }
 
@@ -352,8 +362,8 @@ ISR(INT0_vect)                         // ext IRQ - count geiger pulses
     if (++total > 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME)
         total = 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME;
 
-    if (scr_page != SCR_NOBOOST && boost_state != BOOST_ON)
-        boost_state = BOOST_ON;        // force boost pulse
+    if (boost_pulses < 20)
+        boost_pulses = 20;             // 10 msec boost
 
     if (!buzz_disable && !tick_gen)
         tick_gen = 1;                  // make tick
@@ -362,7 +372,7 @@ ISR(INT0_vect)                         // ext IRQ - count geiger pulses
 // 1 kHz timer
 ISR(TIMER0_COMPA_vect)
 {
-    static uint8_t i;
+    uint8_t i;
     static uint8_t cnt0 = 0;
     static uint8_t cnt1 = 0;
     if (msec)
@@ -371,6 +381,10 @@ ISR(TIMER0_COMPA_vect)
     if (++cnt0 == 10) {
         // 100Hz / 10ms here
         cnt0 = 0;
+
+        // boost every 200 msec
+        if (++boost_idle >= 20 && boost_pulses < 20)
+            boost_pulses = 20;         // 20 msec boost
 
         if (timer && !--timer)
             timer_out = 1;
@@ -698,10 +712,7 @@ void loop(void)
         if (++scr_page > SCR_NOBOOST) {
             scr_page = SCR_RATE;
             // little boost up
-            boost_low = (T2_FREQ / BOOST_PUMP_FREQ) - 1;
-            boost_state = BOOST_ON;
-            delay_ms(500);
-            boost_low = (T2_FREQ / BOOST_FREQ) - 1;
+            boost_pulses = 1000;       // 1 sec boost
         }
         redraw = 1;
         break;
