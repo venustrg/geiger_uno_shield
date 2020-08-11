@@ -1,11 +1,15 @@
 // Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
 // Arduino 1.0.5
 // ATmega328P 16MHz
-// mod by venus@trg.ru - 1.6
+// mod by venus@trg.ru - 1.7
+// indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 
 //#include "LiquidCrystal.h"
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
+
+#include <Wire.h>
+#include <BMP180I2C.h>
 
 //#include <avr/delay.h>
 
@@ -51,7 +55,7 @@
 enum scr_pages {
     SCR_RATE = 0,
     SCR_DOSE,
-    SCR_NOBOOST
+    SCR_SENSORS
 };
 
 enum menu_pages {
@@ -71,9 +75,15 @@ volatile uint16_t boost_pulses;        // pulses to go with boost
 uint8_t brightness = 4;                // screen brightness 0..5
 
 //LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
-//const int rs=8, en=9, db4=4, db5=5, db6=6, db7=7, bl=10, blLevel=HIGH;
+//const int rs = 8, en = 9, db4 = 4, db5 = 5, db6 = 6, db7 = 7, bl = 10, blLevel = LOW;
 //hd44780_pinIO lcd(rs, en, db4, db5, db6, db7, bl, blLevel);
 hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
+
+#define I2C_ADDRESS 0x77
+//create an BMP180 object using the I2C interface
+BMP180I2C bmp180(I2C_ADDRESS);
+
+uint8_t sensors = 0;
 
 enum keypress {
     KEY_RIGHT = 1,
@@ -93,7 +103,8 @@ volatile uint32_t rate_max;            // max rate
 uint32_t dose;                         // calculated dose
 uint8_t t_sec, t_min, t_hrs;           // clock
 
-volatile uint8_t scr_page;             // currently displayed page
+volatile uint8_t scr_page = SCR_RATE;  // currently displayed page
+//volatile uint8_t scr_page = SCR_SENSORS;  // currently displayed page
 
 uint8_t redraw = 1;                    // redraw screen
 uint8_t alarm = 0;                     // alarm raised
@@ -265,6 +276,26 @@ void setup(void)
     EICRA = (1 << ISC01) | (0 << ISC01);        // irq0 - falling edge
     EIMSK = (0 << INT1) | (1 << INT0); // enable irq0
 
+    //Serial.begin(9600);
+    Wire.begin();
+    /* Initialise BMP180 sensor */
+    if (bmp180.begin()) {
+        sensors = 1;
+        //reset sensor to default parameters.
+        bmp180.resetToDefaults();
+        //enable ultra high resolution mode for pressure measurements
+        bmp180.setSamplingMode(BMP180MI::MODE_UHR);
+        bmp180.measurePressure();
+        do {
+            delay_ms(10);
+        } while (!bmp180.hasValue());
+        bmp180.getPressure();
+        bmp180.measureTemperature();
+        do {
+            delay_ms(10);
+        } while (!bmp180.hasValue());
+        bmp180.getTemperature();
+    }
 }
 
 enum boost_states {
@@ -294,7 +325,7 @@ ISR(TIMER2_COMPA_vect)
     // boost processing
     switch (boost_state) {
     case BOOST_IDLE:
-        if (scr_page != SCR_NOBOOST && boost_pulses)
+        if (scr_page != SCR_SENSORS && boost_pulses)
             boost_state = BOOST_ON;
         else
             break;
@@ -645,9 +676,11 @@ void menu(void)
     }
 }
 
+
 void loop(void)
 {
     uint8_t i;
+    float val;
     if (alarm && alarm_disable == 0)
         alarm_warning();
 
@@ -664,8 +697,16 @@ void loop(void)
             dose = total * GEIGER_TIME / GEIGER_DIV / 3600;
             sprintf(str_buff, "D0SE   %6lu uR", dose);
             break;
-        case SCR_NOBOOST:
-            sprintf(str_buff, "b00St 0ff       ");
+        case SCR_SENSORS:
+            if (sensors && bmp180.measurePressure()) {
+                do {
+                    delay_ms(10);
+                } while (!bmp180.hasValue());
+                val = bmp180.getPressure();
+                sprintf(str_buff, "%4d mmHg %4d m", (int) (val * 0.007501),
+                        (int) (-log(val / 101325.0) * 8.31 * 293.0 / 0.029 / 9.81));
+            } else
+                sprintf(str_buff, "b00St 0ff       ");
             break;
         }
         lcd.setCursor(0, 0);
@@ -678,8 +719,20 @@ void loop(void)
         case SCR_DOSE:
             sprintf(str_buff, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
-        case SCR_NOBOOST:
-            sprintf(str_buff, "ChARGiNG");
+        case SCR_SENSORS:
+            // start a temperature measurement
+            if (sensors && bmp180.measureTemperature()) {
+                do {
+                    delay_ms(10);
+                } while (!bmp180.hasValue());
+                dtostrf(bmp180.getTemperature(), 6, 1, str_buff);
+                strcat(str_buff, "\xdf");
+                strcat(str_buff, "C");
+                //Serial.print("Temperature: ");
+                //Serial.print(val);
+                //Serial.println(" C");
+            } else
+                sprintf(str_buff, "no BM180");
             break;
         }
         lcd.setCursor(8, 1);
@@ -709,7 +762,7 @@ void loop(void)
     // handle keypress
     switch (check_keys()) {
     case KEY_UP:
-        if (++scr_page > SCR_NOBOOST) {
+        if (++scr_page > SCR_SENSORS) {
             scr_page = SCR_RATE;
             // little boost up
             boost_pulses = 1000;       // 1 sec boost
