@@ -1,17 +1,21 @@
-// Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
-// Arduino 1.0.5
-// ATmega328P 16MHz
-// mod by venus@trg.ru - 1.7
-// indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
+/*
+  Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
+  Arduino 1.0.5
+  ATmega328P 16MHz
+  mod by venus@trg.ru - 1.7
 
-//#include "LiquidCrystal.h"
+  required libraries:
+   hd44780 by Bill Perry (used v1.3.1)
+   BMP180MI by Gregor Christandl (used v0.2.0)
+
+  indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
+*/
+
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
 
 #include <Wire.h>
 #include <BMP180I2C.h>
-
-//#include <avr/delay.h>
 
 // rate measurement time
 //#define GEIGER_TIME 75                 // 75 sec for SI29BG
@@ -259,8 +263,25 @@ void setup(void)
     lcd.setCursor(0, 1);
     lcd.print("StARtiNG");
 
-    boost_pulses = 1000;               // 1 sec boost
+    //Serial.begin(9600);
+    Wire.begin();
+    /* Initialise BMP180 sensor */
+    if (bmp180.begin()) {
+        sensors = 1;
+        //reset sensor to default parameters.
+        //bmp180.resetToDefaults();
+        //enable ultra high resolution mode for pressure measurements
+        bmp180.setSamplingMode(BMP180MI::MODE_UHR);
+        bmp180.measureTemperature();
+        bmp180.measurePressure();
+        do {
+            delay_ms(10);
+        } while (!bmp180.hasValue());
+        bmp180.getTemperature();
+        bmp180.getPressure();
+    }
 
+    boost_pulses = 1000;               // 1 sec boost
     delay_ms(1000);                    // wait for boost
 
     lcd.clear();
@@ -275,27 +296,6 @@ void setup(void)
     // irq
     EICRA = (1 << ISC01) | (0 << ISC01);        // irq0 - falling edge
     EIMSK = (0 << INT1) | (1 << INT0); // enable irq0
-
-    //Serial.begin(9600);
-    Wire.begin();
-    /* Initialise BMP180 sensor */
-    if (bmp180.begin()) {
-        sensors = 1;
-        //reset sensor to default parameters.
-        bmp180.resetToDefaults();
-        //enable ultra high resolution mode for pressure measurements
-        bmp180.setSamplingMode(BMP180MI::MODE_UHR);
-        bmp180.measurePressure();
-        do {
-            delay_ms(10);
-        } while (!bmp180.hasValue());
-        bmp180.getPressure();
-        bmp180.measureTemperature();
-        do {
-            delay_ms(10);
-        } while (!bmp180.hasValue());
-        bmp180.getTemperature();
-    }
 }
 
 enum boost_states {
