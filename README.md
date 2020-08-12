@@ -9,4 +9,4 @@ described and discussed here - https://cxem.net/dozimetr/3-10.php
 
 remastered and optimized sketch.
 
-added BMP180/GY-65 baro/temp sensor support. connected to 3.3V, GND, A4 (SDA), A5 (SCL).
+added BMP180/GY-68 baro/temp sensor support. connected to 3.3V, GND, A4 (SDA), A5 (SCL).
