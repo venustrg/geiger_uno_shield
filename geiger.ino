@@ -2,7 +2,7 @@
   Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
   Arduino 1.0.5
   ATmega328P 16MHz
-  mod by venus@trg.ru - 1.7
+  mod by venus@trg.ru - 1.8
 
   required libraries:
    hd44780 by Bill Perry (used v1.3.1)
@@ -281,7 +281,7 @@ void setup(void)
         bmp180.getPressure();
     }
 
-    boost_pulses = 1000;               // 1 sec boost
+    boost_pulses = BOOST_FREQ;         // 1 sec boost
     delay_ms(1000);                    // wait for boost
 
     lcd.clear();
@@ -294,7 +294,8 @@ void setup(void)
     lcd.createChar(5, s5);
 
     // irq
-    EICRA = (1 << ISC01) | (0 << ISC01);        // irq0 - falling edge
+    //EICRA = (1 << ISC01) | (0 << ISC00);        // irq0 - falling edge
+    EICRA = (1 << ISC01) | (1 << ISC00);        // irq0 - rising edge
     EIMSK = (0 << INT1) | (1 << INT0); // enable irq0
 }
 
@@ -393,8 +394,8 @@ ISR(INT0_vect)                         // ext IRQ - count geiger pulses
     if (++total > 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME)
         total = 999999UL * 3600 * GEIGER_DIV / GEIGER_TIME;
 
-    if (boost_pulses < 20)
-        boost_pulses = 20;             // 10 msec boost
+    if (boost_pulses < BOOST_FREQ / 50)
+        boost_pulses = BOOST_FREQ / 50; // 10 msec boost
 
     if (!buzz_disable && !tick_gen)
         tick_gen = 1;                  // make tick
@@ -414,8 +415,8 @@ ISR(TIMER0_COMPA_vect)
         cnt0 = 0;
 
         // boost every 200 msec
-        if (++boost_idle >= 20 && boost_pulses < 20)
-            boost_pulses = 20;         // 20 msec boost
+        if (++boost_idle >= BOOST_FREQ / 50 && boost_pulses < BOOST_FREQ / 50)
+            boost_pulses = BOOST_FREQ / 50;     // 20 msec boost
 
         if (timer && !--timer)
             timer_out = 1;
@@ -765,7 +766,7 @@ void loop(void)
         if (++scr_page > SCR_SENSORS) {
             scr_page = SCR_RATE;
             // little boost up
-            boost_pulses = 1000;       // 1 sec boost
+            boost_pulses = BOOST_FREQ; // 1 sec boost
         }
         redraw = 1;
         break;
