@@ -726,7 +726,7 @@ void loop(void)
                 do {
                     delay_ms(10);
                 } while (!bmp180.hasValue());
-                dtostrf(bmp180.getTemperature(), 6, 1, str_buff);
+                sprintf(str_buff, "%4d hPa", (int) (val / 100.0)), dtostrf(bmp180.getTemperature(), 6, 1, str_buff + 8);
                 strcat(str_buff, "\xdf");
                 strcat(str_buff, "C");
                 //Serial.print("Temperature: ");
@@ -736,30 +736,34 @@ void loop(void)
                 sprintf(str_buff, "no BM180");
             break;
         }
-        lcd.setCursor(8, 1);
-        lcd.print(str_buff);
-        // alarm on/off sign
-        lcd.setCursor(0, 1);
-        if (alarm_disable) {           // if alarm prohibited
-            if (alarm_wait) {          // white while rate lowered
-                lcd.write(byte(3));    // "awaiting" sign - "..."
-                lcd.write(byte(3));
-            } else
+        if (scr_page != SCR_SENSORS) {
+            lcd.setCursor(8, 1);
+            lcd.print(str_buff);
+            // alarm on/off sign
+            lcd.setCursor(0, 1);
+            if (alarm_disable) {       // if alarm prohibited
+                if (alarm_wait) {      // white while rate lowered
+                    lcd.write(byte(3)); // "awaiting" sign - "..."
+                    lcd.write(byte(3));
+                } else
+                    lcd.print("  ");
+            } else {
+                lcd.write(byte(0));    // "alarm on" sign
+                lcd.write(byte(1));
+            }
+            // buzzer on/off sign
+            lcd.setCursor(3, 1);
+            if (buzz_disable)
                 lcd.print("  ");
+            else {
+                lcd.write(byte(4));    // "buzzer on" sign
+                lcd.write(byte(5));
+            }
         } else {
-            lcd.write(byte(0));        // "alarm on" sign
-            lcd.write(byte(1));
-        }
-        // buzzer on/off sign
-        lcd.setCursor(3, 1);
-        if (buzz_disable)
-            lcd.print("  ");
-        else {
-            lcd.write(byte(4));        // "buzzer on" sign
-            lcd.write(byte(5));
+            lcd.setCursor(0, 1);
+            lcd.print(str_buff);
         }
     }
-
     // handle keypress
     switch (check_keys()) {
     case KEY_UP:
