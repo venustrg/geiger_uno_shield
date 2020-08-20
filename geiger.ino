@@ -132,7 +132,7 @@ void delay_ms(uint16_t ms)
         __asm__("nop\n\t");
 }
 
-char str_buff[18];
+char str_buf[18];
 
 // *INDENT-OFF*
 
@@ -259,9 +259,9 @@ void setup(void)
     lcd.begin(16, 2);
     set_brightness();
     lcd.setCursor(0, 0);
-    lcd.print("GEiGER COUNtER");
+    lcd.write("GEiGER COUNtER");
     lcd.setCursor(0, 1);
-    lcd.print("StARtiNG");
+    lcd.write("StARtiNG");
 
     //Serial.begin(9600);
     Wire.begin();
@@ -519,7 +519,7 @@ void alarm_warning(void)
     delay_ms(10);
 
     lcd.setCursor(0, 1);
-    lcd.print("WARNiNG");
+    lcd.write("WARNiNG");
     redraw = 1;
     sound_state = SOUND_START;
 
@@ -528,9 +528,9 @@ void alarm_warning(void)
             redraw = 0;
             if (rate > rad_alrm)
                 rad_alrm = rate;       // handle max rate
-            sprintf(str_buff, "%6lu uR/h", rad_alrm);
+            sprintf(str_buf, "%6lu uR/h", rad_alrm);
             lcd.setCursor(5, 0);
-            lcd.print(str_buff);
+            lcd.write(str_buf);
         }
 
         switch (sound_state) {
@@ -557,7 +557,7 @@ void alarm_warning(void)
         if (check_keys() == KEY_LEFT) { // stop alarm if LEFT pressed
             beep_gen = 0;
             lcd.setCursor(0, 1);
-            lcd.print("AlARM DiSAblEd");
+            lcd.write("AlARM DiSAblEd");
             for (timer_out = 0, timer = 150; !timer_out && check_keys() != KEY_LEFT;);
             lcd.clear();
             delay_ms(10);
@@ -589,24 +589,24 @@ void menu(void)
             lcd.setCursor(0, 1);
             lcd.write(byte(2));        // "menu page" sign
             lcd.setCursor(2, 1);
-            sprintf(str_buff, "%01u", menu_page + 1);
-            lcd.print(str_buff);
+            sprintf(str_buf, "%01u", menu_page + 1);
+            lcd.write(str_buf);
             switch (menu_page) {
             case SET_BUZZER_VOL:
-                sprintf(str_buff, "BUZZ VOLUME   %2u", buzz_vol);
+                sprintf(str_buf, "BUZZ VOLUME   %2u", buzz_vol);
                 break;
             case SET_ALARM_VOL:
-                sprintf(str_buff, "ALARM VOLUME  %2u", beep_vol);
+                sprintf(str_buf, "ALARM VOLUME  %2u", beep_vol);
                 break;
             case SET_ALARM_LEVEL:
-                sprintf(str_buff, "ALARM LEVEL  %3u", alarm_level);
+                sprintf(str_buf, "ALARM LEVEL  %3u", alarm_level);
                 break;
             case SET_BRIGHTNESS:
-                sprintf(str_buff, "BRIGHTNESS    %2u", brightness);
+                sprintf(str_buf, "BRIGHTNESS    %2u", brightness);
                 break;
             }
             lcd.setCursor(0, 0);
-            lcd.print(str_buff);
+            lcd.write(str_buf);
         }
         // handle keypress
         switch (check_keys()) {
@@ -691,12 +691,12 @@ void loop(void)
         switch (scr_page) {
         case SCR_RATE:
             // rate, uR/h
-            sprintf(str_buff, "RAtE %6lu uR/h", rate);
+            sprintf(str_buf, "RAtE %6lu uR/h", rate);
             break;
         case SCR_DOSE:
             // dose, uR
             dose = total * GEIGER_TIME / GEIGER_DIV / 3600;
-            sprintf(str_buff, "D0SE   %6lu uR", dose);
+            sprintf(str_buf, "D0SE   %6lu uR", dose);
             break;
         case SCR_SENSORS:
             if (sensors && bmp180.measurePressure()) {
@@ -704,21 +704,21 @@ void loop(void)
                     delay_ms(10);
                 } while (!bmp180.hasValue());
                 val = bmp180.getPressure();
-                sprintf(str_buff, "%4d mmHg %4d m", (int) (val * 0.007501),
+                sprintf(str_buf, "%4d mmHg %4d m", (int) (val * 0.007501),
                         (int) (-log(val / 101325.0) * 8.31 * 293.0 / 0.029 / 9.81));
             } else
-                sprintf(str_buff, "b00St 0ff       ");
+                sprintf(str_buf, "b00St 0ff       ");
             break;
         }
         lcd.setCursor(0, 0);
-        lcd.print(str_buff);
+        lcd.write(str_buf);
         // 2nd line
         switch (scr_page) {
         case SCR_RATE:
-            sprintf(str_buff, "  %6lu", rate_max);
+            sprintf(str_buf, "  %6lu", rate_max);
             break;                     // peak rate
         case SCR_DOSE:
-            sprintf(str_buff, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
+            sprintf(str_buf, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
         case SCR_SENSORS:
             // start a temperature measurement
@@ -726,42 +726,41 @@ void loop(void)
                 do {
                     delay_ms(10);
                 } while (!bmp180.hasValue());
-                sprintf(str_buff, "%4d hPa", (int) (val / 100.0)), dtostrf(bmp180.getTemperature(), 6, 1, str_buff + 8);
-                strcat(str_buff, "\xdf");
-                strcat(str_buff, "C");
+                sprintf(str_buf, "%4d hPa", (int) (val / 100.0)), dtostrf(bmp180.getTemperature(), 6, 1, str_buf + 8);
+                strcat(str_buf, "\xdf");
+                strcat(str_buf, "C");
                 //Serial.print("Temperature: ");
                 //Serial.print(val);
                 //Serial.println(" C");
             } else
-                sprintf(str_buff, "no BM180");
+                sprintf(str_buf, "no BM180");
             break;
         }
         if (scr_page != SCR_SENSORS) {
             lcd.setCursor(8, 1);
-            lcd.print(str_buff);
+            lcd.write(str_buf);
             // alarm on/off sign
-            lcd.setCursor(0, 1);
+            memset(str_buf, ' ', 8);
             if (alarm_disable) {       // if alarm prohibited
-                if (alarm_wait) {      // white while rate lowered
-                    lcd.write(byte(3)); // "awaiting" sign - "..."
-                    lcd.write(byte(3));
-                } else
-                    lcd.print("  ");
+                if (alarm_wait)        // white while rate lowered
+                    str_buf[0] = str_buf[1] = '\x03';   // "awaiting" sign - "..."
+                else
+                    str_buf[0] = str_buf[1] = ' ';
             } else {
-                lcd.write(byte(0));    // "alarm on" sign
-                lcd.write(byte(1));
+                str_buf[0] = '\x00';   // "alarm on" sign
+                str_buf[1] = '\x01';   // "alarm on" sign
             }
-            // buzzer on/off sign
-            lcd.setCursor(3, 1);
             if (buzz_disable)
-                lcd.print("  ");
+                str_buf[3] = str_buf[4] = ' ';
             else {
-                lcd.write(byte(4));    // "buzzer on" sign
-                lcd.write(byte(5));
+                str_buf[3] = '\x04';   // "buzzer on" sign
+                str_buf[4] = '\x05';   // "buzzer on" sign
             }
+            lcd.setCursor(0, 1);
+            lcd.write(str_buf, 8);
         } else {
             lcd.setCursor(0, 1);
-            lcd.print(str_buff);
+            lcd.write(str_buf);
         }
     }
     // handle keypress
