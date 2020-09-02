@@ -2,11 +2,12 @@
   Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
   Arduino 1.0.5
   ATmega328P 16MHz
-  mod by venus@trg.ru - 1.8
+  mod by venus@trg.ru - 2.0
 
   required libraries:
-   hd44780 by Bill Perry (used v1.3.1)
-   BMP180MI by Gregor Christandl (used v0.2.0)
+    hd44780 by Bill Perry (used v1.3.1)
+    BMP180MI by Gregor Christandl (used v0.2.0)
+    AHTX0 by Adafruit (used v2.0.0)
 
   indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 */
@@ -14,8 +15,12 @@
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
 
+#include <EEPROM.h>
 #include <Wire.h>
 #include <BMP180I2C.h>
+#include <Adafruit_AHTX0.h>
+
+//#define SERIAL_DEBUG
 
 // rate measurement time
 //#define GEIGER_TIME 75                 // 75 sec for SI29BG
@@ -86,8 +91,13 @@ hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
 #define I2C_ADDRESS 0x77
 //create an BMP180 object using the I2C interface
 BMP180I2C bmp180(I2C_ADDRESS);
+Adafruit_AHTX0 aht;
 
-uint8_t sensors = 0;
+#define SENS_NONE   0x00
+#define SENS_BMP180 0x01
+#define SENS_AHT10  0x02
+
+uint8_t sensors = SENS_NONE;
 
 enum keypress {
     KEY_RIGHT = 1,
@@ -107,8 +117,8 @@ volatile uint32_t rate_max;            // max rate
 uint32_t dose;                         // calculated dose
 uint8_t t_sec, t_min, t_hrs;           // clock
 
-volatile uint8_t scr_page = SCR_RATE;  // currently displayed page
-//volatile uint8_t scr_page = SCR_SENSORS;  // currently displayed page
+//volatile uint8_t scr_page = SCR_RATE;  // currently displayed page
+volatile uint8_t scr_page = SCR_SENSORS;        // currently displayed page
 
 uint8_t redraw = 1;                    // redraw screen
 uint8_t alarm = 0;                     // alarm raised
@@ -210,6 +220,40 @@ uint8_t  s5[8] = {
 
 // *INDENT-ON*
 
+void eeprom_read(void)
+{
+    if ((scr_page = EEPROM.read(0x00)) > SCR_SENSORS)
+        scr_page = SCR_SENSORS;
+    alarm_disable = EEPROM.read(0x01);
+    buzz_disable = EEPROM.read(0x02);
+    if (!(buzz_vol = EEPROM.read(0x03)) || buzz_vol > 5)
+        buzz_vol = 5;
+    if (!(beep_vol = EEPROM.read(0x04)) || beep_vol > 5)
+        beep_vol = 5;
+    if ((alarm_level = EEPROM.read(0x05)) < 40 || alarm_level > 250)
+        alarm_level = 50;
+    if ((brightness = EEPROM.read(0x06)) > 5)
+        brightness = 4;
+#ifdef SERIAL_DEBUG
+    Serial.println("reading EEPROM");
+#endif
+}
+
+void eeprom_update(void)
+{
+    EEPROM.update(0x00, scr_page);
+    EEPROM.update(0x01, alarm_disable);
+    EEPROM.update(0x02, buzz_disable);
+    EEPROM.update(0x03, buzz_vol);
+    EEPROM.update(0x04, beep_vol);
+    EEPROM.update(0x05, alarm_level);
+    EEPROM.update(0x06, brightness);
+#ifdef SERIAL_DEBUG
+    Serial.println("EEPROM updated");
+#endif
+
+}
+
 // calculate timer parameters for given frequency and volume
 void calc_beep()
 {
@@ -256,34 +300,39 @@ void setup(void)
     OCR2A = F_CPU / 8 / T2_FREQ;       // calc OCR for 100kHz
     TIMSK2 |= (1 << OCIE2A);           // enable t2
 
+    eeprom_read();
+
     lcd.begin(16, 2);
     set_brightness();
     lcd.setCursor(0, 0);
     lcd.write("GEiGER COUNtER");
     lcd.setCursor(0, 1);
     lcd.write("StARtiNG");
-
-    //Serial.begin(9600);
+#ifdef SERIAL_DEBUG
+    Serial.begin(115200);
+#endif
     Wire.begin();
     /* Initialise BMP180 sensor */
     if (bmp180.begin()) {
-        sensors = 1;
+        sensors |= SENS_BMP180;
         //reset sensor to default parameters.
         //bmp180.resetToDefaults();
         //enable ultra high resolution mode for pressure measurements
         bmp180.setSamplingMode(BMP180MI::MODE_UHR);
         bmp180.measureTemperature();
         bmp180.measurePressure();
-        do {
+        do
             delay_ms(10);
-        } while (!bmp180.hasValue());
+        while (!bmp180.hasValue());
         bmp180.getTemperature();
         bmp180.getPressure();
     }
-
-    boost_pulses = BOOST_FREQ;         // 1 sec boost
-    delay_ms(1000);                    // wait for boost
-
+    if (aht.begin())
+        sensors |= SENS_AHT10;
+    if (scr_page != SCR_SENSORS) {
+        boost_pulses = BOOST_FREQ;     // 1 sec boost
+        delay_ms(1000);                // wait for boost
+    }
     lcd.clear();
     delay_ms(10);
     lcd.createChar(0, s0);             // custom chars loading
@@ -407,6 +456,7 @@ ISR(TIMER0_COMPA_vect)
     uint8_t i;
     static uint8_t cnt0 = 0;
     static uint8_t cnt1 = 0;
+    static uint8_t eeup = 0;
     if (msec)
         msec--;
 
@@ -463,6 +513,10 @@ ISR(TIMER0_COMPA_vect)
                 }
             }
             redraw = 1;
+            if (++eeup == 5) {
+                eeup = 0;
+                eeprom_update();
+            }
         }
 
     }
@@ -699,7 +753,7 @@ void loop(void)
             sprintf(str_buf, "D0SE   %6lu uR", dose);
             break;
         case SCR_SENSORS:
-            if (sensors && bmp180.measurePressure()) {
+            if ((sensors & SENS_BMP180) && bmp180.measurePressure()) {
                 do {
                     delay_ms(10);
                 } while (!bmp180.hasValue());
@@ -721,19 +775,34 @@ void loop(void)
             sprintf(str_buf, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
         case SCR_SENSORS:
-            // start a temperature measurement
-            if (sensors && bmp180.measureTemperature()) {
+            if ((sensors & SENS_AHT10)) {
+                sensors_event_t humidity, temp;
+                aht.getEvent(&humidity, &temp); // populate temp and humidity objects with fresh data
+                dtostrf(humidity.relative_humidity, 5, 1, str_buf);
+                strcat(str_buf, "%rH");
+                dtostrf(temp.temperature, 6, 1, str_buf + 8);
+                strcat(str_buf, "\xdf");
+                strcat(str_buf, "C");
+#ifdef SERIAL_DEBUG
+                Serial.print("Temperature: ");
+                Serial.print(temp.temperature);
+                Serial.println(" C");
+#endif
+            } else if ((sensors & SENS_BMP180) && bmp180.measureTemperature()) {
                 do {
                     delay_ms(10);
                 } while (!bmp180.hasValue());
-                sprintf(str_buf, "%4d hPa", (int) (val / 100.0)), dtostrf(bmp180.getTemperature(), 6, 1, str_buf + 8);
+                sprintf(str_buf, "%4d hPa", (int) (val / 100.0));
+                dtostrf(bmp180.getTemperature(), 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
                 strcat(str_buf, "C");
-                //Serial.print("Temperature: ");
-                //Serial.print(val);
-                //Serial.println(" C");
+#ifdef SERIAL_DEBUG
+                Serial.print("Temperature: ");
+                Serial.print(val);
+                Serial.println(" C");
+#endif
             } else
-                sprintf(str_buf, "no BM180");
+                sprintf(str_buf, "no sensors");
             break;
         }
         if (scr_page != SCR_SENSORS) {
