@@ -11,6 +11,7 @@
 
   indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 */
+#define APP_VERSION "2.0"
 
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
@@ -307,11 +308,14 @@ void setup(void)
     lcd.setCursor(0, 0);
     lcd.write("GEiGER COUNtER");
     lcd.setCursor(0, 1);
-    lcd.write("StARtiNG");
+    lcd.write(APP_VERSION" StARtiNG");
 #ifdef SERIAL_DEBUG
     Serial.begin(115200);
 #endif
     Wire.begin();
+    if (scr_page != SCR_SENSORS)
+        boost_pulses = BOOST_FREQ;     // 1 sec boost
+    delay_ms(1000);                // wait for boost
     /* Initialise BMP180 sensor */
     if (bmp180.begin()) {
         sensors |= SENS_BMP180;
@@ -329,10 +333,6 @@ void setup(void)
     }
     if (aht.begin())
         sensors |= SENS_AHT10;
-    if (scr_page != SCR_SENSORS) {
-        boost_pulses = BOOST_FREQ;     // 1 sec boost
-        delay_ms(1000);                // wait for boost
-    }
     lcd.clear();
     delay_ms(10);
     lcd.createChar(0, s0);             // custom chars loading
