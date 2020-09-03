@@ -2,23 +2,23 @@
   Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
   Arduino 1.0.5
   ATmega328P 16MHz
-  mod by venus@trg.ru - 2.0
+  mod by venus@trg.ru - 2.1
 
   required libraries:
     hd44780 by Bill Perry (used v1.3.1)
-    BMP180MI by Gregor Christandl (used v0.2.0)
+    BMP085 unified by Adafruit (used v1.1.0)
     AHTX0 by Adafruit (used v2.0.0)
 
   indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 */
-#define APP_VERSION "2.0"
+#define APP_VERSION "2.1"
 
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
 
 #include <EEPROM.h>
-#include <Wire.h>
-#include <BMP180I2C.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP085_U.h>
 #include <Adafruit_AHTX0.h>
 
 //#define SERIAL_DEBUG
@@ -31,7 +31,6 @@
 #define GEIGER_TIME 21                 // SBT-10A -- 2.17 / sec == 15 pulses for 6.9s ~~ 7s
 #define GEIGER_DIV  3                  // SBT-10A -- TIME=28, DIV=4 or TIME=21, DIV=3
 
-#define T0_FREQ     1000               // timer0 frequency
 #define T2_FREQ  100000L               // timer2 (main) frequency
 
 #define BOOST_FREQ  1000               // boost converter 10us pulses frequency
@@ -89,9 +88,7 @@ uint8_t brightness = 4;                // screen brightness 0..5
 //hd44780_pinIO lcd(rs, en, db4, db5, db6, db7, bl, blLevel);
 hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
 
-#define I2C_ADDRESS 0x77
-//create an BMP180 object using the I2C interface
-BMP180I2C bmp180(I2C_ADDRESS);
+Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10180);
 Adafruit_AHTX0 aht;
 
 #define SENS_NONE   0x00
@@ -135,6 +132,8 @@ uint8_t beep_vol = 3;                  // alarm beep volume (1-5)
 uint8_t alarm_level = 50;              // alarm rate level, uR/h (40..250 step 10)
 
 volatile uint16_t msec = 0;
+
+uint8_t i;
 
 void delay_ms(uint16_t ms)
 {
@@ -268,10 +267,17 @@ void set_brightness()
     // 0..5 ==> 255..5
     lcd.setBacklight(255 - brightness * 50);    // maybe +5
     delay_ms(10);
+#ifdef SERIAL_DEBUG
+    Serial.println("brightness has been set");
+#endif
 }
 
 void setup(void)
 {
+
+#ifdef SERIAL_DEBUG
+    Serial.begin(115200);
+#endif
 
     bitSet(LED_DDR, LED);              // disable LED on PB5 (pin 13) - Arduino Uno
     bitClear(LED_PORT, LED);           // disable LED on PB5 (pin 13) - Arduino Uno
@@ -287,13 +293,6 @@ void setup(void)
 
     calc_beep();
 
-    // timer0 - 1kHz (for 1ms/10ms/1s timings)
-    TCNT0 = 0;
-    TCCR0A = (1 << WGM01);             // CTC mode
-    TCCR0B = (0 << CS02) | (1 << CS01) | (1 << CS00);   // div=64 -- 125kHz base
-    OCR0A = F_CPU / 64 / T0_FREQ;      // calc OCR for 1kHz
-    TIMSK0 |= (1 << OCIE0A);           // enable t0
-
     // timer2 - 100kHz (for 10us boost/sound pulses)
     TCNT2 = 0;
     TCCR2A = (1 << WGM21);             // CTC mode
@@ -308,31 +307,37 @@ void setup(void)
     lcd.setCursor(0, 0);
     lcd.write("GEiGER COUNtER");
     lcd.setCursor(0, 1);
-    lcd.write(APP_VERSION" StARtiNG");
-#ifdef SERIAL_DEBUG
-    Serial.begin(115200);
-#endif
-    Wire.begin();
-    if (scr_page != SCR_SENSORS)
-        boost_pulses = BOOST_FREQ;     // 1 sec boost
-    delay_ms(1000);                // wait for boost
+    lcd.write(APP_VERSION " StARtiNG");
     /* Initialise BMP180 sensor */
-    if (bmp180.begin()) {
+    if (bmp.begin()) {
         sensors |= SENS_BMP180;
-        //reset sensor to default parameters.
-        //bmp180.resetToDefaults();
-        //enable ultra high resolution mode for pressure measurements
-        bmp180.setSamplingMode(BMP180MI::MODE_UHR);
-        bmp180.measureTemperature();
-        bmp180.measurePressure();
-        do
-            delay_ms(10);
-        while (!bmp180.hasValue());
-        bmp180.getTemperature();
-        bmp180.getPressure();
+#ifdef SERIAL_DEBUG
+        sensor_t sensor;
+        bmp.getSensor(&sensor);
+        Serial.print("Sensor:       ");
+        Serial.println(sensor.name);
+        Serial.print("Driver Ver:   ");
+        Serial.println(sensor.version);
+        Serial.print("Unique ID:    ");
+        Serial.println(sensor.sensor_id);
+        Serial.print("Max Value:    ");
+        Serial.print(sensor.max_value);
+        Serial.println(" hPa");
+        Serial.print("Min Value:    ");
+        Serial.print(sensor.min_value);
+        Serial.println(" hPa");
+        Serial.print("Resolution:   ");
+        Serial.print(sensor.resolution);
+        Serial.println(" hPa");
+#endif
+        sensors_event_t event;
+        bmp.getEvent(&event);
     }
     if (aht.begin())
         sensors |= SENS_AHT10;
+    if (scr_page != SCR_SENSORS)
+        boost_pulses = BOOST_FREQ;     // 1 sec boost
+    delay_ms(1000);                    // wait for boost
     lcd.clear();
     delay_ms(10);
     lcd.createChar(0, s0);             // custom chars loading
@@ -371,6 +376,10 @@ ISR(TIMER2_COMPA_vect)
     static uint8_t beep_state = BEEP_IDLE;
     static uint16_t boost_low;
     static uint32_t beep_running;
+    static uint8_t i;
+    static uint8_t cnt0 = 0;
+    static uint8_t cnt1 = 0;
+    static uint8_t cntms = 0;
 
     // boost processing
     switch (boost_state) {
@@ -432,6 +441,71 @@ ISR(TIMER2_COMPA_vect)
         tick_gen = 0;
     } else if (tick_running && !--tick_running)
         BUZZER_OFF;
+
+    if (++cntms == 100) {
+        // 1kHz / 10ms here
+        cntms = 0;
+
+        // delay_ms() processing
+        if (msec)
+            msec--;
+
+        if (++cnt0 == 10) {
+            // 100Hz / 10ms here
+            cnt0 = 0;
+
+            // boost every 200 msec
+            if (++boost_idle >= BOOST_FREQ / 50 && boost_pulses < BOOST_FREQ / 50)
+                boost_pulses = BOOST_FREQ / 50; // 20 msec boost
+
+            if (timer && !--timer)
+                timer_out = 1;
+
+            if (++cnt1 == 100) {
+                // 1Hz / 1s here
+                cnt1 = 0;
+
+                for (i = 0, rate = 0; i < GEIGER_TIME; i++)
+                    rate += geiger[i]; // count rate for GEIGER_TIME seconds
+
+                rate /= GEIGER_DIV;
+
+                if (rate > 999999)
+                    rate = 999999;     // rate overflow
+
+                if (rate > rate_max)
+                    rate_max = rate;   // save max rate
+
+                if (rate >= alarm_level)
+                    alarm = 1;         // rate too high - alarm
+                else {
+                    alarm = 0;
+                    if (alarm_wait) {
+                        alarm_wait = 0;
+                        alarm_disable = 0;
+                    }
+                }
+
+                // next sec - shift geiger array, zero 1st
+                for (i = GEIGER_TIME - 1; i > 0; i--)
+                    geiger[i] = geiger[i - 1];
+                geiger[0] = 0;
+
+                // dose counting clock
+                if (++t_sec > 59) {
+                    t_sec = 0;
+                    if (++t_min > 59) {
+                        t_min = 0;
+                        if (++t_hrs > 99) {
+                            t_hrs = t_min = t_sec = 0;
+                            total = 0;
+                        }
+                    }
+                }
+                redraw = 1;
+            }
+        }
+    }
 }
 
 ISR(INT0_vect)                         // ext IRQ - count geiger pulses
@@ -448,78 +522,6 @@ ISR(INT0_vect)                         // ext IRQ - count geiger pulses
 
     if (!buzz_disable && !tick_gen)
         tick_gen = 1;                  // make tick
-}
-
-// 1 kHz timer
-ISR(TIMER0_COMPA_vect)
-{
-    uint8_t i;
-    static uint8_t cnt0 = 0;
-    static uint8_t cnt1 = 0;
-    static uint8_t eeup = 0;
-    if (msec)
-        msec--;
-
-    if (++cnt0 == 10) {
-        // 100Hz / 10ms here
-        cnt0 = 0;
-
-        // boost every 200 msec
-        if (++boost_idle >= BOOST_FREQ / 50 && boost_pulses < BOOST_FREQ / 50)
-            boost_pulses = BOOST_FREQ / 50;     // 20 msec boost
-
-        if (timer && !--timer)
-            timer_out = 1;
-
-        if (++cnt1 == 100) {
-            // 1Hz / 1s here
-            cnt1 = 0;
-
-            for (i = 0, rate = 0; i < GEIGER_TIME; i++)
-                rate += geiger[i];     // count rate for GEIGER_TIME seconds
-
-            rate /= GEIGER_DIV;
-
-            if (rate > 999999)
-                rate = 999999;         // rate overflow
-
-            if (rate > rate_max)
-                rate_max = rate;       // save max rate
-
-            if (rate >= alarm_level)
-                alarm = 1;             // rate too high - alarm
-            else {
-                alarm = 0;
-                if (alarm_wait) {
-                    alarm_wait = 0;
-                    alarm_disable = 0;
-                }
-            }
-
-            // next sec - shift geiger array, zero 1st
-            for (i = GEIGER_TIME - 1; i > 0; i--)
-                geiger[i] = geiger[i - 1];
-            geiger[0] = 0;
-
-            // dose counting clock
-            if (++t_sec > 59) {
-                t_sec = 0;
-                if (++t_min > 59) {
-                    t_min = 0;
-                    if (++t_hrs > 99) {
-                        t_hrs = t_min = t_sec = 0;
-                        total = 0;
-                    }
-                }
-            }
-            redraw = 1;
-            if (++eeup == 5) {
-                eeup = 0;
-                eeprom_update();
-            }
-        }
-
-    }
 
 }
 
@@ -732,10 +734,15 @@ void menu(void)
 }
 
 
+
+
 void loop(void)
 {
     uint8_t i;
-    float val;
+    //  float val;
+    static uint8_t eeup = 5;
+    sensors_event_t event, temp;
+    float temperature;
     if (alarm && alarm_disable == 0)
         alarm_warning();
 
@@ -753,13 +760,15 @@ void loop(void)
             sprintf(str_buf, "D0SE   %6lu uR", dose);
             break;
         case SCR_SENSORS:
-            if ((sensors & SENS_BMP180) && bmp180.measurePressure()) {
-                do {
-                    delay_ms(10);
-                } while (!bmp180.hasValue());
-                val = bmp180.getPressure();
-                sprintf(str_buf, "%4d mmHg %4d m", (int) (val * 0.007501),
-                        (int) (-log(val / 101325.0) * 8.31 * 293.0 / 0.029 / 9.81));
+            if ((sensors & SENS_BMP180)) {
+                bmp.getEvent(&event);
+#ifdef SERIAL_DEBUG
+                Serial.print("BMP180 pressure: ");
+                Serial.print(event.pressure);
+                Serial.println(" hPa");
+#endif
+                sprintf(str_buf, "%4d mmHg %4d m", (int) (event.pressure * 0.7501),
+                        (int) (bmp.pressureToAltitude(SENSORS_PRESSURE_SEALEVELHPA, event.pressure)));
             } else
                 sprintf(str_buf, "b00St 0ff       ");
             break;
@@ -776,29 +785,26 @@ void loop(void)
             break;
         case SCR_SENSORS:
             if ((sensors & SENS_AHT10)) {
-                sensors_event_t humidity, temp;
-                aht.getEvent(&humidity, &temp); // populate temp and humidity objects with fresh data
-                dtostrf(humidity.relative_humidity, 5, 1, str_buf);
+                aht.getEvent(&event, &temp);    // populate temp and humidity objects with fresh data
+                dtostrf(event.relative_humidity, 5, 1, str_buf);
                 strcat(str_buf, "%rH");
                 dtostrf(temp.temperature, 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
                 strcat(str_buf, "C");
 #ifdef SERIAL_DEBUG
-                Serial.print("Temperature: ");
+                Serial.print("AHT temp: ");
                 Serial.print(temp.temperature);
                 Serial.println(" C");
 #endif
-            } else if ((sensors & SENS_BMP180) && bmp180.measureTemperature()) {
-                do {
-                    delay_ms(10);
-                } while (!bmp180.hasValue());
-                sprintf(str_buf, "%4d hPa", (int) (val / 100.0));
-                dtostrf(bmp180.getTemperature(), 6, 1, str_buf + 8);
+            } else if ((sensors & SENS_BMP180)) {
+                bmp.getTemperature(&temperature);
+                sprintf(str_buf, "%4d hPa", (int) event.pressure);
+                dtostrf(temperature, 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
                 strcat(str_buf, "C");
 #ifdef SERIAL_DEBUG
-                Serial.print("Temperature: ");
-                Serial.print(val);
+                Serial.print("BMP180 temp: ");
+                Serial.print(temperature);
                 Serial.println(" C");
 #endif
             } else
@@ -830,6 +836,11 @@ void loop(void)
         } else {
             lcd.setCursor(0, 1);
             lcd.write(str_buf);
+        }
+        // update EEPROM every 5 sec
+        if (!--eeup) {
+            eeup = 5;
+            eeprom_update();
         }
     }
     // handle keypress
