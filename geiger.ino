@@ -443,7 +443,7 @@ ISR(TIMER2_COMPA_vect)
         BUZZER_OFF;
 
     if (++cntms == 100) {
-        // 1kHz / 10ms here
+        // 1kHz / 1ms here
         cntms = 0;
 
         // delay_ms() processing
