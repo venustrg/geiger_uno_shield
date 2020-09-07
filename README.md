@@ -5,7 +5,7 @@ schematic and original fw by toxcat - https://github.com/project37cat/gca01
 
 described and discussed here - https://cxem.net/dozimetr/3-10.php
 
-![Screenshot](Schematic_geiger_uno_shield_2020-09-02_20-28-54.png)
+![Screenshot](Schematic_geiger_uno_shield_2020-09-07_13-48-11.png)
 
 + remastered and optimized sketch;
 + schematic modified to avoid interference;
