@@ -330,8 +330,8 @@ void setup(void)
         Serial.print(sensor.resolution);
         Serial.println(" hPa");
 #endif
-        sensors_event_t event;
-        bmp.getEvent(&event);
+        //sensors_event_t event;
+        //bmp.getEvent(&event);
     }
     if (aht.begin())
         sensors |= SENS_AHT10;
