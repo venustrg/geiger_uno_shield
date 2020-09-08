@@ -11,15 +11,14 @@
 
   indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 */
-#define APP_VERSION "2.1"
+#define APP_VERSION "2.2"
 
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
 
 #include <EEPROM.h>
-#include <Adafruit_Sensor.h>
-#include <Adafruit_BMP085_U.h>
 #include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP085_U.h>
 
 //#define SERIAL_DEBUG
 
@@ -96,6 +95,9 @@ Adafruit_AHTX0 aht;
 #define SENS_AHT10  0x02
 
 uint8_t sensors = SENS_NONE;
+uint8_t keep = 0;
+sensors_event_t bmp180, aht10, temp;
+#define SENS_TIME 3
 
 enum keypress {
     KEY_RIGHT = 1,
@@ -131,18 +133,10 @@ uint8_t buzz_vol = 3;                  // buzz tick volume (1-5)
 uint8_t beep_vol = 3;                  // alarm beep volume (1-5)
 uint8_t alarm_level = 50;              // alarm rate level, uR/h (40..250 step 10)
 
-volatile uint16_t msec = 0;
-
 uint8_t i;
 
-void delay_ms(uint16_t ms)
-{
-    msec = ms;
-    while (msec)
-        __asm__("nop\n\t");
-}
-
-char str_buf[18];
+#define SCR_WIDTH 16
+char str_buf[SCR_WIDTH * 2];
 
 // *INDENT-OFF*
 
@@ -266,7 +260,7 @@ void set_brightness()
     // analogWrite(10, brightness * 50); // maybe +5
     // 0..5 ==> 255..5
     lcd.setBacklight(255 - brightness * 50);    // maybe +5
-    delay_ms(10);
+    delay(10);
 #ifdef SERIAL_DEBUG
     Serial.println("brightness has been set");
 #endif
@@ -302,44 +296,24 @@ void setup(void)
 
     eeprom_read();
 
-    lcd.begin(16, 2);
+    lcd.begin(SCR_WIDTH, 2);
     set_brightness();
     lcd.setCursor(0, 0);
     lcd.write("GEiGER COUNtER");
     lcd.setCursor(0, 1);
     lcd.write(APP_VERSION " StARtiNG");
-    /* Initialise BMP180 sensor */
-    if (bmp.begin()) {
+
+    // init BMP180 sensor
+    if (bmp.begin())
         sensors |= SENS_BMP180;
-#ifdef SERIAL_DEBUG
-        sensor_t sensor;
-        bmp.getSensor(&sensor);
-        Serial.print("Sensor:       ");
-        Serial.println(sensor.name);
-        Serial.print("Driver Ver:   ");
-        Serial.println(sensor.version);
-        Serial.print("Unique ID:    ");
-        Serial.println(sensor.sensor_id);
-        Serial.print("Max Value:    ");
-        Serial.print(sensor.max_value);
-        Serial.println(" hPa");
-        Serial.print("Min Value:    ");
-        Serial.print(sensor.min_value);
-        Serial.println(" hPa");
-        Serial.print("Resolution:   ");
-        Serial.print(sensor.resolution);
-        Serial.println(" hPa");
-#endif
-        //sensors_event_t event;
-        //bmp.getEvent(&event);
-    }
+    // init AHT10 sensor
     if (aht.begin())
         sensors |= SENS_AHT10;
     if (scr_page != SCR_SENSORS)
         boost_pulses = BOOST_FREQ;     // 1 sec boost
-    delay_ms(1000);                    // wait for boost
+    delay(1000);                       // wait for boost
     lcd.clear();
-    delay_ms(10);
+    delay(10);
     lcd.createChar(0, s0);             // custom chars loading
     lcd.createChar(1, s1);
     lcd.createChar(2, s2);
@@ -446,10 +420,6 @@ ISR(TIMER2_COMPA_vect)
         // 1kHz / 1ms here
         cntms = 0;
 
-        // delay_ms() processing
-        if (msec)
-            msec--;
-
         if (++cnt0 == 10) {
             // 100Hz / 10ms here
             cnt0 = 0;
@@ -547,7 +517,7 @@ uint8_t check_keys(void)
 
     uint8_t new_key = get_key();       // read key state
     if (new_key != old_key) {          // key state changed == key pressed
-        delay_ms(5);                   // protect from bouncing
+        delay(5);                      // protect from bouncing
         new_key = get_key();
         if (new_key != old_key) {
             old_key = new_key;
@@ -572,7 +542,7 @@ void alarm_warning(void)
     buzz_disable = 1;                  // disable ticker
 
     lcd.clear();
-    delay_ms(10);
+    delay(10);
 
     lcd.setCursor(0, 1);
     lcd.write("WARNiNG");
@@ -584,7 +554,7 @@ void alarm_warning(void)
             redraw = 0;
             if (rate > rad_alrm)
                 rad_alrm = rate;       // handle max rate
-            sprintf(str_buf, "%6lu uR/h", rad_alrm);
+            snprintf(str_buf, SCR_WIDTH + 1, "%6lu uR/h", rad_alrm);
             lcd.setCursor(5, 0);
             lcd.write(str_buf);
         }
@@ -616,14 +586,14 @@ void alarm_warning(void)
             lcd.write("AlARM DiSAblEd");
             for (timer_out = 0, timer = 150; !timer_out && check_keys() != KEY_LEFT;);
             lcd.clear();
-            delay_ms(10);
+            delay(10);
             buzz_disable = old_buzz;
             alarm_disable = 1;
             scr_page = SCR_RATE;
             redraw = 1;
             break;
         }
-        delay_ms(10);
+        delay(10);
     }
 }
 
@@ -632,7 +602,7 @@ void menu(void)
     uint8_t menu_page = SET_BUZZER_VOL;
 
     lcd.clear();
-    delay_ms(10);
+    delay(10);
     redraw = 1;
 
     while (1) {
@@ -645,20 +615,20 @@ void menu(void)
             lcd.setCursor(0, 1);
             lcd.write(byte(2));        // "menu page" sign
             lcd.setCursor(2, 1);
-            sprintf(str_buf, "%01u", menu_page + 1);
+            snprintf(str_buf, SCR_WIDTH + 1, "%01u", menu_page + 1);
             lcd.write(str_buf);
             switch (menu_page) {
             case SET_BUZZER_VOL:
-                sprintf(str_buf, "BUZZ VOLUME   %2u", buzz_vol);
+                snprintf(str_buf, SCR_WIDTH + 1, "BUZZ VOLUME   %2u", buzz_vol);
                 break;
             case SET_ALARM_VOL:
-                sprintf(str_buf, "ALARM VOLUME  %2u", beep_vol);
+                snprintf(str_buf, SCR_WIDTH + 1, "ALARM VOLUME  %2u", beep_vol);
                 break;
             case SET_ALARM_LEVEL:
-                sprintf(str_buf, "ALARM LEVEL  %3u", alarm_level);
+                snprintf(str_buf, SCR_WIDTH + 1, "ALARM LEVEL  %3u", alarm_level);
                 break;
             case SET_BRIGHTNESS:
-                sprintf(str_buf, "BRIGHTNESS    %2u", brightness);
+                snprintf(str_buf, SCR_WIDTH + 1, "BRIGHTNESS    %2u", brightness);
                 break;
             }
             lcd.setCursor(0, 0);
@@ -721,7 +691,7 @@ void menu(void)
         case KEY_SELECT:              // select key
             if (++menu_page > SET_BRIGHTNESS) {
                 lcd.clear();
-                delay_ms(10);
+                delay(10);
                 redraw = 1;
                 return;
             }
@@ -729,11 +699,9 @@ void menu(void)
         default:
             break;
         }
-        delay_ms(10);
+        delay(10);
     }
 }
-
-
 
 
 void loop(void)
@@ -741,7 +709,6 @@ void loop(void)
     uint8_t i;
     //  float val;
     static uint8_t eeup = 5;
-    sensors_event_t event, temp;
     float temperature;
     if (alarm && alarm_disable == 0)
         alarm_warning();
@@ -752,25 +719,35 @@ void loop(void)
         switch (scr_page) {
         case SCR_RATE:
             // rate, uR/h
-            sprintf(str_buf, "RAtE %6lu uR/h", rate);
+            snprintf(str_buf, SCR_WIDTH + 1, "RAtE %6lu uR/h", rate);
             break;
         case SCR_DOSE:
             // dose, uR
             dose = total * GEIGER_TIME / GEIGER_DIV / 3600;
-            sprintf(str_buf, "D0SE   %6lu uR", dose);
+            snprintf(str_buf, SCR_WIDTH + 1, "D0SE   %6lu uR", dose);
             break;
         case SCR_SENSORS:
             if ((sensors & SENS_BMP180)) {
-                bmp.getEvent(&event);
+                if (!keep) {
+#ifdef SERIAL_DEBUG
+                    Serial.println("running BMP180..");
+#endif
+                    bmp.getEvent(&bmp180);
+                    delay(50);
+                }
 #ifdef SERIAL_DEBUG
                 Serial.print("BMP180 pressure: ");
-                Serial.print(event.pressure);
+                Serial.print(bmp180.pressure);
                 Serial.println(" hPa");
 #endif
-                sprintf(str_buf, "%4d mmHg %4d m", (int) (event.pressure * 0.7501),
-                        (int) (bmp.pressureToAltitude(SENSORS_PRESSURE_SEALEVELHPA, event.pressure)));
+                snprintf(str_buf, SCR_WIDTH + 1, "%4d mmHg %4d m", (int) (bmp180.pressure * 0.7501),
+                         (int) (bmp.pressureToAltitude(SENSORS_PRESSURE_SEALEVELHPA, bmp180.pressure)));
             } else
-                sprintf(str_buf, "b00St 0ff       ");
+                snprintf(str_buf, SCR_WIDTH + 1, "b00St 0ff       ");
+#ifdef SERIAL_DEBUG
+            Serial.print("=1: ");
+            Serial.println(str_buf);
+#endif
             break;
         }
         lcd.setCursor(0, 0);
@@ -778,15 +755,20 @@ void loop(void)
         // 2nd line
         switch (scr_page) {
         case SCR_RATE:
-            sprintf(str_buf, "  %6lu", rate_max);
+            snprintf(str_buf, SCR_WIDTH + 1, "  %6lu", rate_max);
             break;                     // peak rate
         case SCR_DOSE:
-            sprintf(str_buf, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
+            snprintf(str_buf, SCR_WIDTH + 1, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
         case SCR_SENSORS:
             if ((sensors & SENS_AHT10)) {
-                aht.getEvent(&event, &temp);    // populate temp and humidity objects with fresh data
-                dtostrf(event.relative_humidity, 5, 1, str_buf);
+                if (!keep) {
+#ifdef SERIAL_DEBUG
+                    Serial.println("running AHT10..");
+#endif
+                    aht.getEvent(&aht10, &temp);        // populate temp and ity objects with fresh data
+                }
+                dtostrf(aht10.relative_humidity, 5, 1, str_buf);
                 strcat(str_buf, "%rH");
                 dtostrf(temp.temperature, 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
@@ -797,8 +779,13 @@ void loop(void)
                 Serial.println(" C");
 #endif
             } else if ((sensors & SENS_BMP180)) {
-                bmp.getTemperature(&temperature);
-                sprintf(str_buf, "%4d hPa", (int) event.pressure);
+                if (!keep) {
+#ifdef SERIAL_DEBUG
+                    Serial.println("running t BMP180..");
+#endif
+                    bmp.getTemperature(&temperature);
+                }
+                snprintf(str_buf, SCR_WIDTH + 1, "%4d hPa", (int) bmp180.pressure);
                 dtostrf(temperature, 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
                 strcat(str_buf, "C");
@@ -808,9 +795,15 @@ void loop(void)
                 Serial.println(" C");
 #endif
             } else
-                sprintf(str_buf, "no sensors");
+                snprintf(str_buf, SCR_WIDTH + 1, "no sensors");
+#ifdef SERIAL_DEBUG
+            Serial.print("=2: ");
+            Serial.println(str_buf);
+#endif
             break;
         }
+        if (sensors && ++keep == SENS_TIME)
+            keep = 0;
         if (scr_page != SCR_SENSORS) {
             lcd.setCursor(8, 1);
             lcd.write(str_buf);
@@ -887,5 +880,5 @@ void loop(void)
         menu();
         break;
     }
-    delay_ms(10);
+    delay(10);
 }
