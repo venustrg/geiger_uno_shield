@@ -2,7 +2,7 @@
   Arduino Geiger counter 01.3 by toxcat // https://cxem.net/dozimetr/3-10.php
   Arduino 1.0.5
   ATmega328P 16MHz
-  mod by venus@trg.ru - 2.1
+  mod by venus@trg.ru - 2.3
 
   required libraries:
     hd44780 by Bill Perry (used v1.3.1)
@@ -11,14 +11,14 @@
 
   indented with: indent -kr -nut -c 40 -cd 40 -l 120 geiger.ino
 */
-#define APP_VERSION "2.2"
+#define APP_VERSION "2.3"
 
 #include <hd44780.h>
 #include <hd44780ioClass/hd44780_pinIO.h>       // Arduino pin i/o class header
-
 #include <EEPROM.h>
-#include <Adafruit_AHTX0.h>
-#include <Adafruit_BMP085_U.h>
+
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
 
 //#define SERIAL_DEBUG
 
@@ -87,17 +87,20 @@ uint8_t brightness = 4;                // screen brightness 0..5
 //hd44780_pinIO lcd(rs, en, db4, db5, db6, db7, bl, blLevel);
 hd44780_pinIO lcd(8, 9, 4, 5, 6, 7, 10, LOW);
 
-Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10180);
-Adafruit_AHTX0 aht;
+Adafruit_BME280 bme;                   // I2C
+
+#define BME280_ADDR 0x76
 
 #define SENS_NONE   0x00
-#define SENS_BMP180 0x01
-#define SENS_AHT10  0x02
+#define SENS_BME280 0x01
+
+#define SEALEVELPRESSURE_HPA (1013.25)
 
 uint8_t sensors = SENS_NONE;
 uint8_t keep = 0;
-sensors_event_t bmp180, aht10, temp;
-#define SENS_TIME 3
+float prs, alt, hum, temp;
+
+#define SENS_TIME 2
 
 enum keypress {
     KEY_RIGHT = 1,
@@ -303,12 +306,10 @@ void setup(void)
     lcd.setCursor(0, 1);
     lcd.write(APP_VERSION " StARtiNG");
 
-    // init BMP180 sensor
-    if (bmp.begin())
-        sensors |= SENS_BMP180;
-    // init AHT10 sensor
-    if (aht.begin())
-        sensors |= SENS_AHT10;
+    // init BME280 sensor
+    if (bme.begin(BME280_ADDR))
+        sensors |= SENS_BME280;
+
     if (scr_page != SCR_SENSORS)
         boost_pulses = BOOST_FREQ;     // 1 sec boost
     delay(1000);                       // wait for boost
@@ -508,7 +509,6 @@ uint8_t get_key(void)
         }
     return key;
 }
-
 
 uint8_t check_keys(void)
 {
@@ -727,25 +727,27 @@ void loop(void)
             snprintf(str_buf, SCR_WIDTH + 1, "D0SE   %6lu uR", dose);
             break;
         case SCR_SENSORS:
-            if ((sensors & SENS_BMP180)) {
+            if ((sensors & SENS_BME280)) {
                 if (!keep) {
 #ifdef SERIAL_DEBUG
-                    Serial.println("running BMP180..");
+                    Serial.println("running BME280..");
 #endif
-                    bmp.getEvent(&bmp180);
-                    delay(50);
+                    prs = bme.readPressure();
+                    alt = bme.readAltitude(SEALEVELPRESSURE_HPA);
                 }
 #ifdef SERIAL_DEBUG
-                Serial.print("BMP180 pressure: ");
-                Serial.print(bmp180.pressure);
+                Serial.print("BME180 pressure: ");
+                Serial.print(prs);
                 Serial.println(" hPa");
+                Serial.print("BME180 altiture: ");
+                Serial.print(alt);
+                Serial.println(" m");
 #endif
-                snprintf(str_buf, SCR_WIDTH + 1, "%4d mmHg %4d m", (int) (bmp180.pressure * 0.7501),
-                         (int) (bmp.pressureToAltitude(SENSORS_PRESSURE_SEALEVELHPA, bmp180.pressure)));
+                snprintf(str_buf, SCR_WIDTH + 1, "%4d mmHg %4d m", (int) (prs * 0.007501), (int) alt);
             } else
                 snprintf(str_buf, SCR_WIDTH + 1, "b00St 0ff       ");
 #ifdef SERIAL_DEBUG
-            Serial.print("=1: ");
+            Serial.print("=1= ");
             Serial.println(str_buf);
 #endif
             break;
@@ -761,43 +763,31 @@ void loop(void)
             snprintf(str_buf, SCR_WIDTH + 1, "%02u:%02u:%02u", t_hrs, t_min, t_sec);
             break;
         case SCR_SENSORS:
-            if ((sensors & SENS_AHT10)) {
+            if ((sensors & SENS_BME280)) {
                 if (!keep) {
 #ifdef SERIAL_DEBUG
                     Serial.println("running AHT10..");
 #endif
-                    aht.getEvent(&aht10, &temp);        // populate temp and ity objects with fresh data
+                    hum = bme.readHumidity();
+                    temp = bme.readTemperature();
                 }
-                dtostrf(aht10.relative_humidity, 5, 1, str_buf);
+                dtostrf(hum, 5, 1, str_buf);
                 strcat(str_buf, "%rH");
-                dtostrf(temp.temperature, 6, 1, str_buf + 8);
+                dtostrf(temp, 6, 1, str_buf + 8);
                 strcat(str_buf, "\xdf");
                 strcat(str_buf, "C");
 #ifdef SERIAL_DEBUG
+                Serial.print("AHT humidity: ");
+                Serial.print(hum);
+                Serial.println(" %%rH");
                 Serial.print("AHT temp: ");
-                Serial.print(temp.temperature);
-                Serial.println(" C");
-#endif
-            } else if ((sensors & SENS_BMP180)) {
-                if (!keep) {
-#ifdef SERIAL_DEBUG
-                    Serial.println("running t BMP180..");
-#endif
-                    bmp.getTemperature(&temperature);
-                }
-                snprintf(str_buf, SCR_WIDTH + 1, "%4d hPa", (int) bmp180.pressure);
-                dtostrf(temperature, 6, 1, str_buf + 8);
-                strcat(str_buf, "\xdf");
-                strcat(str_buf, "C");
-#ifdef SERIAL_DEBUG
-                Serial.print("BMP180 temp: ");
-                Serial.print(temperature);
+                Serial.print(temp);
                 Serial.println(" C");
 #endif
             } else
                 snprintf(str_buf, SCR_WIDTH + 1, "no sensors");
 #ifdef SERIAL_DEBUG
-            Serial.print("=2: ");
+            Serial.print("=2= ");
             Serial.println(str_buf);
 #endif
             break;
